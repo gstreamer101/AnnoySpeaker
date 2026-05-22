@@ -34,3 +34,6 @@ venv/
 # Claude Code settings (personal — not shared)
 .claude/settings.json
 .claude/settings.local.json
+
+# 개발일지 (개인 기록용 — GitHub에 올리지 않음)
+docs/dev-log/
