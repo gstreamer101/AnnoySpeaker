@@ -32,10 +32,26 @@ from PySide6.QtWidgets import (
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PLUGIN_DIR = PROJECT_ROOT / "plugin" / "builddir"
+def _is_frozen_bundle() -> bool:
+    """PyInstaller .app 번들 환경인지 여부."""
+    return getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+
+
+if _is_frozen_bundle():
+    # .app 번들: PyInstaller가 추가 리소스/바이너리를 _MEIPASS 아래에 풀어둠
+    # --add-binary "src:dest" 의 dest는 폴더라서 binary는 dest 안에 들어감
+    _BUNDLE_ROOT = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    PLUGIN_DIR = _BUNDLE_ROOT / "plugin"
+    EXPORT_TOOL = _BUNDLE_ROOT / "tools" / "kb-tts-export" / "kb-tts-export"
+else:
+    # 개발 모드 (python main.py)
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    PLUGIN_DIR = PROJECT_ROOT / "plugin" / "builddir"
+    EXPORT_TOOL = PROJECT_ROOT / "tools" / "kb-tts-export" / "kb-tts-export"
+
+# GStreamer Framework는 시스템 의존 (번들 안 함). 사용자의 맥북에
+# 공식 .pkg가 깔려있어야 동작.
 GST_LAUNCH = "/Library/Frameworks/GStreamer.framework/Versions/1.0/bin/gst-launch-1.0"
-EXPORT_TOOL = PROJECT_ROOT / "tools" / "kb-tts-export" / "kb-tts-export"
 
 # 문장 종결로 인정하는 문자 (이미 끝나있으면 마침표 중복 안 붙임)
 _TERMINATORS = ".!?…。！？"

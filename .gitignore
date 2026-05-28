@@ -44,6 +44,10 @@ balabolka_ui.img
 # 도구 빌드 산출물 (clang/make로 만든 native binary)
 tools/kb-tts-export/kb-tts-export
 
+# PyInstaller 빌드 산출물 (.spec은 커밋해서 빌드 재현 가능하게)
+gui/build/
+gui/dist/
+
 # 음성 산출물 (테스트로 만든 m4a 등)
 *.m4a
 *.wav
