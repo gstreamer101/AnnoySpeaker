@@ -40,3 +40,12 @@ docs/
 
 # 외부 참고 자산 (윈도우 Balabolka UI 스크린샷 등 — 저작권 회피)
 balabolka_ui.img
+
+# 도구 빌드 산출물 (clang/make로 만든 native binary)
+tools/kb-tts-export/kb-tts-export
+
+# 음성 산출물 (테스트로 만든 m4a 등)
+*.m4a
+*.wav
+*.mp3
+*.aiff

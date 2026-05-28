@@ -18,6 +18,7 @@ from PySide6.QtCore import QProcess, QProcessEnvironment, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = PROJECT_ROOT / "plugin" / "builddir"
 GST_LAUNCH = "/Library/Frameworks/GStreamer.framework/Versions/1.0/bin/gst-launch-1.0"
+EXPORT_TOOL = PROJECT_ROOT / "tools" / "kb-tts-export" / "kb-tts-export"
 
 # 문장 종결로 인정하는 문자 (이미 끝나있으면 마침표 중복 안 붙임)
 _TERMINATORS = ".!?…。！？"
@@ -133,6 +135,7 @@ class MainWindow(QMainWindow):
         self.resize(760, 560)
 
         self._process: QProcess | None = None
+        self._export_process: QProcess | None = None
 
         self._build_toolbar()
         self._build_central()
@@ -170,6 +173,20 @@ class MainWindow(QMainWindow):
         self.stop_action.triggered.connect(self._on_stop)
         self.stop_action.setEnabled(False)
         toolbar.addAction(self.stop_action)
+
+        toolbar.addSeparator()
+
+        self.export_action = QAction(
+            style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton),
+            "내보내기",
+            self,
+        )
+        self.export_action.setShortcut(QKeySequence("Ctrl+S"))
+        self.export_action.setToolTip(
+            "현재 텍스트와 슬라이더 설정대로 .m4a 음성 파일로 저장 (Cmd+S)"
+        )
+        self.export_action.triggered.connect(self._on_export)
+        toolbar.addAction(self.export_action)
 
     def _build_central(self) -> None:
         central = QWidget()
@@ -304,6 +321,75 @@ class MainWindow(QMainWindow):
             f"재생 중… (속도 {ui_x:.1f}x · rate {rate:.2f}, "
             f"음높이 {int(pitch * 100)}%, 볼륨 {int(volume * 100)}%)"
         )
+
+    def _on_export(self) -> None:
+        if self._export_process is not None:
+            return  # 이미 내보내는 중
+
+        if not EXPORT_TOOL.exists():
+            self._fail(
+                f"export 도구가 없습니다. tools/kb-tts-export/ 에서 'make' 실행 필요."
+            )
+            return
+
+        text = preprocess_for_speech(self.text_edit.toPlainText())
+        if not text:
+            self.status_label.setText("입력된 텍스트가 없습니다.")
+            return
+        # 라이브 재생과 동일한 한국어 안전 패딩 적용
+        text = text + " ,,"
+
+        # 파일 경로 받기
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "음성 파일로 저장",
+            "untitled.m4a",
+            "Audio (*.m4a)",
+        )
+        if not path:
+            return  # 사용자 취소
+        if not path.lower().endswith(".m4a"):
+            path += ".m4a"
+
+        rate, pitch, volume = self._slider_values()
+        args = [
+            "--out", path,
+            "--rate", f"{rate:.2f}",
+            "--pitch", f"{pitch:.2f}",
+            "--volume", f"{volume:.2f}",
+        ]
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        proc.finished.connect(
+            lambda code, status, p=path: self._on_export_finished(p, code, status)
+        )
+        proc.errorOccurred.connect(self._on_error)
+
+        self._export_process = proc
+        proc.start(str(EXPORT_TOOL), args)
+        if not proc.waitForStarted(3000):
+            self._fail("kb-tts-export 시작 실패")
+            self._export_process = None
+            return
+
+        proc.write(text.encode("utf-8"))
+        proc.closeWriteChannel()
+
+        self.export_action.setEnabled(False)
+        self.status_label.setText(f"내보내는 중… → {path}")
+
+    def _on_export_finished(
+        self, path: str, exit_code: int, exit_status: QProcess.ExitStatus
+    ) -> None:
+        self._export_process = None
+        self.export_action.setEnabled(True)
+        if exit_status == QProcess.ExitStatus.CrashExit:
+            self.status_label.setText("내보내기 중단됨")
+        elif exit_code != 0:
+            self.status_label.setText(f"내보내기 실패 (exit {exit_code})")
+        else:
+            self.status_label.setText(f"저장됨: {path}")
 
     def _on_stop(self) -> None:
         if self._process is None:
