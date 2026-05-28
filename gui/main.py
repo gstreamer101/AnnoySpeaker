@@ -10,8 +10,10 @@ on the plugin side but not yet in the GUI (next iteration).
 
 from __future__ import annotations
 
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, Qt
@@ -152,6 +154,7 @@ class MainWindow(QMainWindow):
 
         self._process: QProcess | None = None
         self._export_process: QProcess | None = None
+        self._tmp_text_path: str | None = None
 
         self._build_toolbar()
         self._build_central()
@@ -298,6 +301,19 @@ class MainWindow(QMainWindow):
             self._fail(f"gst-launch-1.0이 없음: {GST_LAUNCH}")
             return
 
+        # 긴 텍스트도 한 buffer로 처리되도록 stdin 파이프 대신 임시 파일 + filesrc 사용.
+        # (stdin은 macOS pipe buffer(~16~64KB) + fdsrc 기본 청크(4KB)로 잘려 여러 utterance가
+        # 되면서 청크 경계 처리에서 문제가 생김. filesrc + 큰 blocksize면 전체를 한 번에 읽음.)
+        try:
+            tmp_fd, self._tmp_text_path = tempfile.mkstemp(
+                suffix=".txt", prefix="kb-tts-"
+            )
+            with os.fdopen(tmp_fd, "wb") as f:
+                f.write(text.encode("utf-8"))
+        except OSError as e:
+            self._fail(f"임시 파일 생성 실패: {e}")
+            return
+
         env = QProcessEnvironment.systemEnvironment()
         env.insert("GST_PLUGIN_PATH", str(PLUGIN_DIR))
 
@@ -310,7 +326,9 @@ class MainWindow(QMainWindow):
         rate, pitch, volume = self._slider_values()
         args = [
             "--quiet",
-            "fdsrc",
+            "filesrc",
+            f"location={self._tmp_text_path}",
+            "blocksize=104857600",  # 100MB - 어떤 길이든 한 buffer로
             "!",
             "text/x-raw,format=utf8",
             "!",
@@ -325,10 +343,8 @@ class MainWindow(QMainWindow):
         if not proc.waitForStarted(3000):
             self._fail("gst-launch-1.0 시작 실패")
             self._process = None
+            self._cleanup_tmp_text()
             return
-
-        proc.write(text.encode("utf-8"))
-        proc.closeWriteChannel()
 
         self.play_action.setEnabled(False)
         self.stop_action.setEnabled(True)
@@ -415,8 +431,17 @@ class MainWindow(QMainWindow):
             self._process.kill()
         # finished 시그널에서 상태 정리됨
 
+    def _cleanup_tmp_text(self) -> None:
+        if self._tmp_text_path:
+            try:
+                os.unlink(self._tmp_text_path)
+            except OSError:
+                pass
+            self._tmp_text_path = None
+
     def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         self._process = None
+        self._cleanup_tmp_text()
         self.play_action.setEnabled(True)
         self.stop_action.setEnabled(False)
         if exit_status == QProcess.ExitStatus.CrashExit:

@@ -1,7 +1,8 @@
 /* kb-tts-export: Synthesize stdin text to an .m4a file via AVSpeechSynthesizer.
  *
- * Mirrors the options exposed by the macttssink GStreamer plugin so the GUI
- * can pass the same rate/pitch/volume/voice settings used for live playback.
+ * 텍스트가 매우 길면 AVSpeech의 writeUtterance:toBufferCallback:가 첫 buffer
+ * 생성 전 내부 처리에 비선형적으로 오랜 시간을 씀. 그래서 stdin을 줄 단위로
+ * 쪼개 여러 utterance를 sequential 처리하면서 같은 m4a 파일에 누적 write.
  *
  * Usage:
  *   echo "안녕하세요" | kb-tts-export --out file.m4a [options]
@@ -45,6 +46,226 @@ read_stdin_utf8 (void)
     return nil;
   }
   return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
+/* 텍스트를 줄 단위로 모으되 누적 길이가 MAX_CHUNK_CHARS를 넘으면 새 chunk로
+ * flush. 빈 줄(단락 구분)에서도 강제 flush. 각 chunk 끝에 한국어 잘림 방지
+ * 안전 패딩 " ,," 부착.
+ *
+ * 너무 작은 chunk(한 줄당 한 utterance)면 AVSpeech 초기화 오버헤드가 누적되어
+ * 느려지고, 너무 큰 chunk(전체 한 utterance)면 AVSpeech가 비선형으로 폭증.
+ * ~1500자가 측정상 안정적 sweet spot (1500자는 약 1초).
+ */
+#define MAX_CHUNK_CHARS 1500
+
+/* 매우 긴 단일 줄을 MAX_CHUNK_CHARS 이내 part로 분할.
+ * 자연 분할점(문장 종결 → 공백) 우선, 못 찾으면 강제로 자름.
+ * 코드 블록, 표 행, 줄바꿈 없이 긴 영어 등이 한 줄에 수천자로
+ * 들어와도 chunk 단일 utterance 비선형 폭증을 방지. */
+static NSArray<NSString *> *
+split_long_line (NSString *line)
+{
+  NSMutableArray<NSString *> *parts = [NSMutableArray array];
+  NSCharacterSet *sentence_ends =
+      [NSCharacterSet characterSetWithCharactersInString:@".!?…。！？"];
+  NSCharacterSet *whitespace = [NSCharacterSet whitespaceCharacterSet];
+
+  NSUInteger pos = 0;
+  while (pos < line.length) {
+    NSUInteger remain = line.length - pos;
+    if (remain <= MAX_CHUNK_CHARS) {
+      [parts addObject:[line substringFromIndex:pos]];
+      break;
+    }
+
+    NSRange search = NSMakeRange (pos, MAX_CHUNK_CHARS);
+    /* 1) 문장 종결(.!?) 가장 마지막 */
+    NSRange r1 = [line rangeOfCharacterFromSet:sentence_ends
+                                       options:NSBackwardsSearch
+                                         range:search];
+    NSUInteger cut = NSNotFound;
+    if (r1.location != NSNotFound
+        && r1.location > pos + MAX_CHUNK_CHARS / 3) {
+      cut = r1.location + r1.length;  /* 종결문자 포함 */
+    } else {
+      /* 2) 공백 가장 마지막 */
+      NSRange r2 = [line rangeOfCharacterFromSet:whitespace
+                                         options:NSBackwardsSearch
+                                           range:search];
+      if (r2.location != NSNotFound
+          && r2.location > pos + MAX_CHUNK_CHARS / 3) {
+        cut = r2.location + r2.length;
+      }
+    }
+    if (cut == NSNotFound) {
+      /* 3) 분할점 없음 — 강제로 자름 */
+      cut = pos + MAX_CHUNK_CHARS;
+    }
+
+    [parts addObject:[line substringWithRange:NSMakeRange (pos, cut - pos)]];
+    pos = cut;
+  }
+  return parts;
+}
+
+static NSArray<NSString *> *
+split_into_chunks (NSString *text)
+{
+  NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
+  NSMutableArray<NSString *> *chunks = [NSMutableArray array];
+  NSMutableString *current = [NSMutableString string];
+
+  NSArray<NSString *> *lines =
+      [text componentsSeparatedByCharactersInSet:
+                [NSCharacterSet newlineCharacterSet]];
+
+  for (NSString *raw in lines) {
+    NSString *line = [raw stringByTrimmingCharactersInSet:ws];
+
+    if (line.length == 0) {
+      /* 빈 줄 = 단락 구분 → 현재 chunk 종료 */
+      if (current.length > 0) {
+        [chunks addObject:[current stringByAppendingString:@" ,,"]];
+        [current setString:@""];
+      }
+      continue;
+    }
+
+    /* 한 줄 자체가 너무 길면 먼저 part 단위로 분할 */
+    NSArray<NSString *> *parts = (line.length > MAX_CHUNK_CHARS)
+        ? split_long_line (line)
+        : @[ line ];
+
+    for (NSString *part in parts) {
+      /* 추가 시 너무 커지면 먼저 flush */
+      if (current.length > 0
+          && current.length + part.length + 2 > MAX_CHUNK_CHARS) {
+        [chunks addObject:[current stringByAppendingString:@" ,,"]];
+        [current setString:@""];
+      }
+
+      if (current.length > 0) {
+        [current appendString:@". "];  /* 사이 자연 휴식 */
+      }
+      [current appendString:part];
+    }
+  }
+
+  if (current.length > 0) {
+    [chunks addObject:[current stringByAppendingString:@" ,,"]];
+  }
+
+  return chunks;
+}
+
+static AVSpeechUtterance *
+make_utterance (NSString *text, float rate, float pitch, float volume,
+                AVSpeechSynthesisVoice *voice)
+{
+  AVSpeechUtterance *u = [AVSpeechUtterance speechUtteranceWithString:text];
+  u.rate = rate;
+  u.pitchMultiplier = pitch;
+  u.volume = volume;
+  u.postUtteranceDelay = 0.25;
+  if (voice) {
+    u.voice = voice;
+  }
+  return u;
+}
+
+/* 한 utterance를 합성해 wav 파일에 누적 쓰기. wav_file이 nil이면
+ * 첫 buffer 받을 때 PCM Linear 포맷으로 생성. 에러는 *err_out 으로 반환. */
+static int
+speak_chunk_to_wav (AVSpeechSynthesizer *synth,
+                    AVSpeechUtterance *utterance,
+                    NSURL *wav_url,
+                    AVAudioFile *__strong *wav_file_io,
+                    NSError *__autoreleasing *err_out)
+{
+  __block BOOL done = NO;
+  __block NSError *local_err = nil;
+  __block AVAudioFile *wav_file = *wav_file_io;
+
+  [synth writeUtterance:utterance toBufferCallback:^(AVAudioBuffer *buffer) {
+    AVAudioPCMBuffer *pcm = (AVAudioPCMBuffer *) buffer;
+
+    if (pcm.frameLength == 0) {
+      done = YES;
+      return;
+    }
+
+    if (!wav_file) {
+      /* WAV (PCM Linear) — streaming-friendly. AAC를 직접 누적 쓰면
+       * 인코더 state가 깨져 'dta?' 에러로 파일 열 수 없음. */
+      NSDictionary *settings = @{
+        AVFormatIDKey            : @(kAudioFormatLinearPCM),
+        AVSampleRateKey          : @(pcm.format.sampleRate),
+        AVNumberOfChannelsKey    : @(pcm.format.channelCount),
+        AVLinearPCMBitDepthKey   : @(32),
+        AVLinearPCMIsFloatKey    : @YES,
+        AVLinearPCMIsBigEndianKey: @NO,
+      };
+      wav_file = [[AVAudioFile alloc]
+          initForWriting:wav_url
+                settings:settings
+            commonFormat:pcm.format.commonFormat
+             interleaved:pcm.format.interleaved
+                   error:&local_err];
+      if (!wav_file) {
+        done = YES;
+        return;
+      }
+    }
+
+    NSError *write_err = nil;
+    if (![wav_file writeFromBuffer:pcm error:&write_err]) {
+      local_err = write_err;
+      done = YES;
+    }
+  }];
+
+  while (!done) {
+    @autoreleasepool {
+      [[NSRunLoop currentRunLoop]
+            runMode:NSDefaultRunLoopMode
+         beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    }
+  }
+
+  *wav_file_io = wav_file;
+  if (err_out) {
+    *err_out = local_err;
+  }
+  return local_err ? -1 : 0;
+}
+
+/* afconvert로 WAV → AAC m4a 변환. */
+static int
+convert_wav_to_m4a (NSString *wav_path, NSString *m4a_path)
+{
+  NSTask *task = [[NSTask alloc] init];
+  task.launchPath = @"/usr/bin/afconvert";
+  task.arguments = @[
+    @"-f", @"m4af",
+    @"-d", @"aac",
+    wav_path,
+    m4a_path,
+  ];
+  task.standardOutput = [NSPipe pipe];
+  task.standardError = [NSPipe pipe];
+
+  NSError *err = nil;
+  if (![task launchAndReturnError:&err]) {
+    fprintf (stderr, "afconvert launch failed: %s\n",
+        [err.localizedDescription UTF8String]);
+    return -1;
+  }
+  [task waitUntilExit];
+  if (task.terminationStatus != 0) {
+    fprintf (stderr, "afconvert failed with exit %d\n", task.terminationStatus);
+    return -1;
+  }
+  return 0;
 }
 
 int
@@ -91,98 +312,66 @@ main (int argc, const char *argv[])
       return 1;
     }
 
-    AVSpeechUtterance *utterance =
-        [AVSpeechUtterance speechUtteranceWithString:text];
-    utterance.rate = rate;
-    utterance.pitchMultiplier = pitch;
-    utterance.volume = volume;
-    /* 한국어 마지막 음절 잘림 방지 (macttssink와 동일한 마진) */
-    utterance.postUtteranceDelay = 0.25;
+    NSArray<NSString *> *chunks = split_into_chunks (text);
+    if (chunks.count == 0) {
+      fprintf (stderr, "Error: no non-empty lines in input\n");
+      return 1;
+    }
 
+    AVSpeechSynthesisVoice *voice = nil;
     if (voice_id) {
-      AVSpeechSynthesisVoice *voice =
-          [AVSpeechSynthesisVoice voiceWithIdentifier:voice_id];
+      voice = [AVSpeechSynthesisVoice voiceWithIdentifier:voice_id];
       if (!voice) {
         voice = [AVSpeechSynthesisVoice voiceWithLanguage:voice_id];
       }
-      if (voice) {
-        utterance.voice = voice;
-      } else {
+      if (!voice) {
         fprintf (stderr, "Warning: voice '%s' not found, using default\n",
             [voice_id UTF8String]);
       }
     }
 
     NSURL *out_url = [NSURL fileURLWithPath:out_path];
-    /* 기존 파일이 있으면 덮어쓰기 */
     [[NSFileManager defaultManager] removeItemAtURL:out_url error:nil];
 
-    __block AVAudioFile *audio_file = nil;
-    __block NSError *file_error = nil;
-    __block BOOL done = NO;
+    /* 임시 WAV 파일 (PCM raw) — 누적 쓰기에 안전한 포맷 */
+    NSString *wav_path = [NSString stringWithFormat:@"%@.tmp.wav", out_path];
+    NSURL *wav_url = [NSURL fileURLWithPath:wav_path];
+    [[NSFileManager defaultManager] removeItemAtURL:wav_url error:nil];
 
     AVSpeechSynthesizer *synth = [[AVSpeechSynthesizer alloc] init];
+    AVAudioFile *wav_file = nil;
 
-    [synth writeUtterance:utterance toBufferCallback:^(AVAudioBuffer *buffer) {
-      AVAudioPCMBuffer *pcm = (AVAudioPCMBuffer *) buffer;
+    int total = (int) chunks.count;
+    fprintf (stderr,
+        "Encoding %d chunk(s) → %s (rate=%.2f pitch=%.2f volume=%.2f voice=%s)\n",
+        total, [out_path UTF8String], rate, pitch, volume,
+        voice_id ? [voice_id UTF8String] : "(default)");
 
-      if (pcm.frameLength == 0) {
-        /* EOS — 마지막 빈 버퍼가 종료 신호 */
-        done = YES;
-        return;
+    int done_count = 0;
+    for (NSString *chunk in chunks) {
+      AVSpeechUtterance *u = make_utterance (chunk, rate, pitch, volume, voice);
+      NSError *err = nil;
+      if (speak_chunk_to_wav (synth, u, wav_url, &wav_file, &err) != 0) {
+        fprintf (stderr, "Error on chunk %d/%d: %s\n",
+            done_count + 1, total,
+            [err.localizedDescription UTF8String]);
+        return 1;
       }
-
-      if (!audio_file) {
-        /* 첫 버퍼에서 포맷을 알 수 있어 그때 파일 생성 */
-        NSDictionary *settings = @{
-          AVFormatIDKey            : @(kAudioFormatMPEG4AAC),
-          AVSampleRateKey          : @(pcm.format.sampleRate),
-          AVNumberOfChannelsKey    : @(pcm.format.channelCount),
-          AVEncoderAudioQualityKey : @(AVAudioQualityHigh),
-        };
-        audio_file = [[AVAudioFile alloc]
-            initForWriting:out_url
-                  settings:settings
-              commonFormat:pcm.format.commonFormat
-               interleaved:pcm.format.interleaved
-                     error:&file_error];
-        if (!audio_file) {
-          done = YES;
-          return;
-        }
-      }
-
-      NSError *write_err = nil;
-      if (![audio_file writeFromBuffer:pcm error:&write_err]) {
-        file_error = write_err;
-        done = YES;
-      }
-    }];
-
-    /* AVSpeechSynthesizer는 main thread의 NSRunLoop를 통해 콜백을 전달하므로
-     * dispatch_semaphore_wait로 block하면 콜백이 영원히 안 옴. RunLoop를
-     * 짧은 단위로 돌리면서 done flag를 폴링한다. */
-    while (!done) {
-      @autoreleasepool {
-        [[NSRunLoop currentRunLoop]
-              runMode:NSDefaultRunLoopMode
-            beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+      done_count++;
+      if (done_count % 10 == 0 || done_count == total) {
+        fprintf (stderr, "  ... %d/%d chunks\n", done_count, total);
       }
     }
 
-    /* ARC가 audio_file을 nil 처리하면 자동 close + flush */
-    audio_file = nil;
+    wav_file = nil;  /* ARC가 close + flush. WAV는 close 시 헤더가 안전히 갱신됨. */
 
-    if (file_error) {
-      fprintf (stderr, "Error writing audio file: %s\n",
-          [file_error.localizedDescription UTF8String]);
+    fprintf (stderr, "Converting WAV → m4a (AAC) ...\n");
+    if (convert_wav_to_m4a (wav_path, out_path) != 0) {
       return 1;
     }
+    [[NSFileManager defaultManager] removeItemAtPath:wav_path error:nil];
 
-    fprintf (stderr,
-        "Saved: %s (rate=%.2f pitch=%.2f volume=%.2f voice=%s)\n",
-        [out_path UTF8String], rate, pitch, volume,
-        voice_id ? [voice_id UTF8String] : "(default)");
+    fprintf (stderr, "Saved: %s\n", [out_path UTF8String]);
     return 0;
   }
 }
