@@ -7,9 +7,9 @@
 > **자동화 옵션:** 아래 §1~§4 절차를 한 번에 실행하는 스크립트가 있습니다.
 > ```bash
 > ./scripts/setup-dev.sh              # 개발용: plugin + GUI venv + export 빌드까지
-> ./scripts/setup-dev.sh --build-app  # 위 + PyInstaller로 .app 빌드까지 (venv 없이 더블클릭 실행)
+> ./scripts/setup-dev.sh --build-app  # 위 + .app 빌드 + /Applications 자동 설치 (Launchpad에서 실행)
 > ```
-> 지원 옵션: `--check-only`(사전 점검만), `--no-gui`, `--no-export`, `--install-deps`(brew 패키지 자동 설치), `--build-app`(추가로 `.app` 빌드), `--help`. **원리와 모든 옵션은 이 문서 본문**에 있으니, 스크립트가 실패하거나 비표준 환경을 쓰는 경우엔 아래를 참고하세요.
+> 지원 옵션: `--check-only`(사전 점검만), `--no-gui`, `--no-export`, `--install-deps`(brew 패키지 자동 설치), `--build-app`(추가로 `.app` 빌드 + 자동 설치), `--no-install`(`--build-app`과 함께: 설치 건너뜀), `--help`. **원리와 모든 옵션은 이 문서 본문**에 있으니, 스크립트가 실패하거나 비표준 환경을 쓰는 경우엔 아래를 참고하세요.
 
 ---
 

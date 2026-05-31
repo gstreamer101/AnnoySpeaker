@@ -11,7 +11,7 @@ macOS용 텍스트 음성 변환 리더. macOS 시스템 음성 합성(AVSpeechS
 
 ## 설치 · 실행
 
-macOS 12 이상에서 **4단계로 끝**납니다. 한 명령으로 빌드 + `.app` 패키징까지 자동.
+macOS 12 이상에서 **3단계로 끝**납니다. 한 명령으로 빌드 + 설치까지 자동.
 
 ### 1) 사전 도구 설치
 
@@ -39,7 +39,7 @@ git clone https://github.com/gstreamer101/AnnoySpeaker.git
 cd AnnoySpeaker
 ```
 
-### 3) 한 명령으로 빌드 + `.app` 패키징
+### 3) 한 명령으로 빌드 + 설치
 
 ```bash
 ./scripts/setup-dev.sh --build-app
@@ -51,25 +51,15 @@ cd AnnoySpeaker
 - `macttssink` GStreamer 플러그인 빌드 (`plugin/builddir/gstmacttssink.dylib`)
 - GUI 가상환경 + PySide6/PyInstaller 설치
 - m4a 내보내기 도구 빌드 (`tools/kb-tts-export`)
-- PyInstaller로 `.app` 빌드 (Python 인터프리터·PySide6·plugin .dylib·export 도구 모두 `.app` 안에 묶음)
+- PyInstaller로 `.app` 빌드 (Python 인터프리터·PySide6·plugin .dylib·export 도구 모두 `.app` 안에 묶음, ≈ 103MB)
+- **`/Applications/AnnoySpeaker.app` 자동 설치** (기존 설치는 새 빌드로 덮어씀)
 
-까지 자동으로 수행해 `gui/dist/AnnoySpeaker.app` (≈ 103MB) 을 만듭니다. 몇 분 소요.
+까지 자동으로 수행합니다. 몇 분 소요.
 
-### 4) 실행
+완료되면 **Launchpad에서 "AnnoySpeaker" 검색하거나 Applications 폴더에서 더블클릭**으로 실행하세요.
 
-```bash
-# Applications에 복사 (Launchpad / Spotlight에서 검색 가능)
-cp -R gui/dist/AnnoySpeaker.app /Applications/
-```
-
-그 다음 **Launchpad에서 "AnnoySpeaker" 검색하거나 Applications 폴더에서 더블클릭**.
-
-또는 빌드 직후 바로 실행만 하고 싶다면:
-
-```bash
-open gui/dist/AnnoySpeaker.app
-```
-
+> **옵션:** `/Applications`에 자동 설치하지 않고 `gui/dist/AnnoySpeaker.app`만 만들고 싶으면 `--no-install`을 추가하세요.
+>
 > **참고:** 현재 앱 아이콘이 macOS 기본(회색)으로 표시됩니다. 아이콘 디자인은 별도 후속 작업입니다.
 
 ---

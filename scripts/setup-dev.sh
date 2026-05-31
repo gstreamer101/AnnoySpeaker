@@ -13,7 +13,8 @@
 #   ./scripts/setup-dev.sh --no-export    # export 도구 빌드 건너뜀
 #   ./scripts/setup-dev.sh --check-only   # 사전 체크만 (빌드 안 함)
 #   ./scripts/setup-dev.sh --install-deps # 누락 brew 패키지 자동 설치
-#   ./scripts/setup-dev.sh --build-app    # 위 단계 + PyInstaller로 .app 빌드
+#   ./scripts/setup-dev.sh --build-app    # 위 단계 + PyInstaller로 .app 빌드 + /Applications 자동 설치
+#   ./scripts/setup-dev.sh --build-app --no-install  # .app 빌드는 하되 /Applications 설치는 건너뜀
 #   ./scripts/setup-dev.sh -h | --help    # 도움말
 #
 # 자세한 절차와 트러블슈팅은 BUILD.md를 참고하세요.
@@ -42,10 +43,11 @@ DO_EXPORT=1
 CHECK_ONLY=0
 INSTALL_DEPS=0
 BUILD_APP=0
+INSTALL_APP=1  # --build-app일 때 /Applications에 자동 복사 (--no-install로 끔)
 
 print_help() {
-  # 파일 상단의 주석 블록 중 헤더(4~20행)만 추출해 출력. 빈 주석 줄은 빈 줄로.
-  sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'
+  # 파일 상단의 주석 블록 중 헤더(4~21행)만 추출해 출력. 빈 주석 줄은 빈 줄로.
+  sed -n '4,21p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 for arg in "$@"; do
@@ -55,6 +57,7 @@ for arg in "$@"; do
     --check-only)    CHECK_ONLY=1 ;;
     --install-deps)  INSTALL_DEPS=1 ;;
     --build-app)     BUILD_APP=1 ;;
+    --no-install)    INSTALL_APP=0 ;;
     -h|--help)       print_help; exit 0 ;;
     *)
       echo "알 수 없는 옵션: $arg" >&2
@@ -328,6 +331,34 @@ if (( BUILD_APP )); then
   fi
 
   cd "$PROJECT_ROOT"
+
+  # /Applications에 자동 설치 (--no-install 주면 건너뜀)
+  if (( INSTALL_APP )); then
+    INSTALLED_APP="/Applications/AnnoySpeaker.app"
+
+    # 기존 설치가 있으면 wipe 후 새로 복사 (cp -R 단독은 디렉토리 merge로
+    # 망가질 수 있어 안전하게 rm + cp).
+    if [[ -e "$INSTALLED_APP" ]]; then
+      note "기존 $INSTALLED_APP 발견 → 새 빌드로 덮어씁니다."
+      if ! rm -rf "$INSTALLED_APP" 2>/dev/null; then
+        fail "기존 $INSTALLED_APP 제거 실패 (권한 문제일 수 있음)."
+        note "다음 명령으로 직접 처리해 주세요: sudo rm -rf $INSTALLED_APP"
+        note "그 후 cp -R gui/dist/AnnoySpeaker.app /Applications/"
+        exit 1
+      fi
+    fi
+
+    if cp -R "$APP_PATH" /Applications/ 2>/dev/null; then
+      ok "/Applications/AnnoySpeaker.app 설치 완료 — Launchpad / Spotlight에서 검색 가능."
+    else
+      fail "/Applications 복사 실패 (권한 문제일 수 있음)."
+      note "다음 명령으로 직접 처리해 주세요:"
+      note "  sudo cp -R gui/dist/AnnoySpeaker.app /Applications/"
+      exit 1
+    fi
+  else
+    note "--no-install 지정 → /Applications 자동 설치 건너뜀."
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────
@@ -356,12 +387,18 @@ if (( DO_GUI )); then
   echo
 fi
 if (( BUILD_APP )); then
-  echo "  ${C_BOLD}# .app을 Applications으로 복사 (Launchpad/Spotlight에서 검색·실행)${C_RESET}"
-  echo "  cp -R gui/dist/AnnoySpeaker.app /Applications/"
-  echo
-  echo "  ${C_BOLD}# 또는 더블클릭으로 바로 실행${C_RESET}"
-  echo "  open gui/dist/AnnoySpeaker.app"
-  echo
+  if (( INSTALL_APP )); then
+    echo "  ${C_BOLD}# Launchpad에서 'AnnoySpeaker' 검색하거나, Applications 폴더에서 더블클릭${C_RESET}"
+    echo "  open -a AnnoySpeaker"
+    echo
+  else
+    echo "  ${C_BOLD}# .app을 Applications으로 복사 (Launchpad/Spotlight에서 검색·실행)${C_RESET}"
+    echo "  cp -R gui/dist/AnnoySpeaker.app /Applications/"
+    echo
+    echo "  ${C_BOLD}# 또는 빌드 디렉터리에서 바로 실행${C_RESET}"
+    echo "  open gui/dist/AnnoySpeaker.app"
+    echo
+  fi
   note "venv 활성화 없이 .app 더블클릭만으로 동작합니다 (PyInstaller가 Python·PySide6를 .app에 묶음)."
   note "현재 앱 아이콘은 macOS 기본(회색)입니다. 아이콘 디자인은 별도 후속 작업."
   echo
