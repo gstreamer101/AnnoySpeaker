@@ -1,0 +1,108 @@
+K-Balabolka — Third-Party Notices
+==================================
+
+This file documents the third-party components that K-Balabolka depends on
+or distributes inside its release artifacts (notably the PyInstaller-built
+`.app` bundle of the GUI). The licenses below apply to those third-party
+components only — K-Balabolka's own source code is licensed under the terms
+described in the `LICENSE` file at the repository root (LGPL-2.1-or-later
+for `plugin/`; MIT for `gui/` and `tools/`).
+
+Splitting our own source license into a permissive license for the GUI does
+NOT remove the obligations attached to the third-party components we
+redistribute. Those obligations are listed here so that downstream users
+can comply with them.
+
+
+§ 1. GStreamer
+--------------
+
+Used by:        `plugin/` (the macttssink GStreamer element links against
+                the GStreamer 1.x runtime via Meson/pkg-config).
+Distribution:   The GStreamer runtime is NOT vendored inside this source
+                tree. End users install it from the official package below.
+                When a `.app` release is produced via PyInstaller, parts of
+                the GStreamer runtime may be bundled inside the `.app`.
+License:        LGPL-2.1-or-later (core / base / good libraries).
+                Individual plugins outside the core set may carry other
+                licenses; consult each plugin's own license notice.
+Source:         The corresponding source code is available from the
+                upstream project at
+                https://gstreamer.freedesktop.org/src/
+                and via the official downloads page at
+                https://gstreamer.freedesktop.org/download/ .
+LGPL compliance: Because this is dynamic linking against an LGPL library,
+                end users are entitled to replace the GStreamer runtime
+                with their own modified version. Installing a different
+                version of the official GStreamer Framework or pointing
+                `DYLD_LIBRARY_PATH` / `GST_PLUGIN_PATH` at a custom build
+                is sufficient for this purpose.
+
+
+§ 2. PySide6 / Qt
+-----------------
+
+Used by:        `gui/` (the PySide6 desktop application). Both PySide6
+                (Python bindings) and the underlying Qt 6 libraries are
+                installed into the virtual environment via PyPI and are
+                bundled into the final `.app` release by PyInstaller.
+License:        Qt for Python (PySide6) and Qt are offered under multiple
+                license options. K-Balabolka uses them under the terms of
+                the GNU Lesser General Public License version 3
+                (LGPL-3.0-only).
+                The full multi-option SPDX expression observed in the
+                upstream sources is:
+                  LicenseRef-Qt-Commercial OR LGPL-3.0-only
+                  OR GPL-2.0-only OR GPL-3.0-only
+Source:         PySide6 source distributions:
+                  https://pypi.org/project/PySide6/#files
+                Qt source archives:
+                  https://download.qt.io/official_releases/qt/
+LGPL compliance: PySide6 and Qt are loaded as dynamic libraries inside the
+                `.app` bundle, so end users may replace them with a
+                compatible version of their own. `gui/requirements.txt`
+                records only a lower bound (`PySide6>=6.8`); the exact
+                version included in a particular `.app` release is the
+                version resolved by pip at build time. It can be inspected
+                from the PyInstaller build log, or by reading the bundled
+                `PySide6/__init__.py` (look for `__version__`) inside the
+                released `.app`.
+
+
+§ 3. AVFoundation / AVSpeechSynthesizer (Apple)
+-----------------------------------------------
+
+Used by:        `plugin/gstmacttssink_macos.m` and
+                `tools/kb-tts-export/kb-tts-export.m` (text-to-speech
+                synthesis via the macOS system speech engine).
+Distribution:   NOT distributed by us. AVFoundation is part of the macOS
+                operating system and is loaded from the user's installed
+                OS at runtime.
+License:        Apple system framework; usage governed by the Apple
+                macOS SDK / Xcode license. Considered a "Major Component"
+                of the operating system under LGPL § 6 (system library
+                exception), so we incur no source-redistribution obligation
+                for it.
+
+
+§ 4. References (design inspiration, no source code copied)
+-----------------------------------------------------------
+
+The following project was studied while designing K-Balabolka's macttssink
+plugin. No source code was copied from it; K-Balabolka's plugin is written
+from scratch in C / Objective-C. This section is provided for academic
+honesty and traceability, not to discharge any license obligation.
+
+- avstack/gst-ttssink
+  Repository: https://github.com/avstack/gst-ttssink
+  License:    MIT OR Apache-2.0 (dual-licensed, per its Cargo.toml)
+  Note:       A Rust-based, cross-platform GStreamer TTS sink. K-Balabolka
+              was implemented independently in C / Objective-C against the
+              same public GStreamer plugin API. The shared structure (a
+              `GstBaseSink` subclass with `class_init` / `_init` / `render`)
+              derives from GStreamer's own documented plugin pattern, not
+              from this project.
+
+The standard `GstBaseSink` subclassing boilerplate used throughout
+`plugin/` is taken from the GStreamer plugin development documentation
+and the GStreamer "good" plugin set, both LGPL-2.1-or-later.
