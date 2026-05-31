@@ -49,7 +49,7 @@ ninja -C builddir
 cd ..
 ```
 
-→ `plugin/builddir/libgstmacttssink.dylib` 가 생성됩니다.
+→ `plugin/builddir/gstmacttssink.dylib` 가 생성됩니다.
 
 ### 4) GUI 실행
 
@@ -84,6 +84,36 @@ echo "안녕하세요, 케이 발라볼카 입니다" | \
 ```
 
 스피커에서 음성이 들리면 OK.
+
+### 7) (옵션) `.app`으로 패키징해서 venv 없이 더블클릭 실행
+
+매번 `source .venv/bin/activate && python main.py` 하기 번거롭다면, PyInstaller로 `.app` 번들을 만들어 두면 됩니다 — Python 인터프리터와 PySide6를 `.app` 안에 묶기 때문에 venv 활성화 없이 더블클릭만으로 실행됩니다.
+
+위 1)~5)를 마친 상태에서 한 명령으로:
+
+```bash
+./scripts/setup-dev.sh --build-app
+```
+
+또는 수동으로:
+
+```bash
+cd gui && source .venv/bin/activate && pyinstaller --noconfirm AnnoySpeaker.spec && cd ..
+```
+
+→ `gui/dist/AnnoySpeaker.app` 생성. `/Applications`으로 복사하면 Launchpad / Spotlight에서 검색 가능:
+
+```bash
+cp -R gui/dist/AnnoySpeaker.app /Applications/
+```
+
+또는 빌드 직후 바로 실행:
+
+```bash
+open gui/dist/AnnoySpeaker.app
+```
+
+> **참고:** 현재 앱 아이콘이 macOS 기본(회색)으로 표시됩니다. 아이콘 디자인은 별도 후속 작업입니다.
 
 ---
 

@@ -6,9 +6,10 @@
 
 > **자동화 옵션:** 아래 §1~§4 절차를 한 번에 실행하는 스크립트가 있습니다.
 > ```bash
-> ./scripts/setup-dev.sh
+> ./scripts/setup-dev.sh              # 개발용: plugin + GUI venv + export 빌드까지
+> ./scripts/setup-dev.sh --build-app  # 위 + PyInstaller로 .app 빌드까지 (venv 없이 더블클릭 실행)
 > ```
-> 사전 도구 점검 → plugin 빌드 → GUI venv + 의존성 설치 → export 도구 빌드까지 한 번에 진행합니다. `--check-only`(사전 점검만), `--no-gui`, `--no-export`, `--install-deps`(brew 패키지 자동 설치), `--help` 옵션을 지원합니다. **원리와 모든 옵션은 이 문서 본문**에 있으니, 스크립트가 실패하거나 비표준 환경을 쓰는 경우엔 아래를 참고하세요.
+> 지원 옵션: `--check-only`(사전 점검만), `--no-gui`, `--no-export`, `--install-deps`(brew 패키지 자동 설치), `--build-app`(추가로 `.app` 빌드), `--help`. **원리와 모든 옵션은 이 문서 본문**에 있으니, 스크립트가 실패하거나 비표준 환경을 쓰는 경우엔 아래를 참고하세요.
 
 ---
 
@@ -67,7 +68,7 @@ meson setup builddir --reconfigure
 ninja -C builddir
 ```
 
-성공하면 `plugin/builddir/libgstmacttssink.dylib` 가 생성됩니다.
+성공하면 `plugin/builddir/gstmacttssink.dylib` 가 생성됩니다.
 
 이미 한 번 `meson setup`을 끝낸 디렉터리에서 재빌드만 하려면 `ninja -C builddir`만 다시 돌리면 됩니다(환경변수 재지정 불필요 — Meson이 이미 캐시).
 
@@ -177,7 +178,7 @@ GObject: g_object_unref: assertion 'NODE_REFCOUNT(object) > 0' failed
 `gst-inspect-1.0 macttssink` 가 "No such element or plugin 'macttssink'"를 반환합니다.
 
 **원인:** `GST_PLUGIN_PATH`가 설정되지 않았거나, 빌드 디렉터리를 잘못 가리킴.
-**해결:** 절대 경로로 `$(pwd)/plugin/builddir`를 지정. `ls plugin/builddir/libgstmacttssink.dylib` 로 dylib가 실제 존재하는지 먼저 확인하세요.
+**해결:** 절대 경로로 `$(pwd)/plugin/builddir`를 지정. `ls plugin/builddir/gstmacttssink.dylib` 로 dylib가 실제 존재하는지 먼저 확인하세요.
 
 ### 6.3 한국어 음성이 영어 발음으로 들림
 

@@ -13,6 +13,7 @@
 #   ./scripts/setup-dev.sh --no-export    # export 도구 빌드 건너뜀
 #   ./scripts/setup-dev.sh --check-only   # 사전 체크만 (빌드 안 함)
 #   ./scripts/setup-dev.sh --install-deps # 누락 brew 패키지 자동 설치
+#   ./scripts/setup-dev.sh --build-app    # 위 단계 + PyInstaller로 .app 빌드
 #   ./scripts/setup-dev.sh -h | --help    # 도움말
 #
 # 자세한 절차와 트러블슈팅은 BUILD.md를 참고하세요.
@@ -40,10 +41,11 @@ DO_GUI=1
 DO_EXPORT=1
 CHECK_ONLY=0
 INSTALL_DEPS=0
+BUILD_APP=0
 
 print_help() {
-  # 파일 상단의 주석 블록 중 헤더(4~19행)만 추출해 출력. 빈 주석 줄은 빈 줄로.
-  sed -n '4,19p' "$0" | sed 's/^# \{0,1\}//'
+  # 파일 상단의 주석 블록 중 헤더(4~20행)만 추출해 출력. 빈 주석 줄은 빈 줄로.
+  sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 for arg in "$@"; do
@@ -52,6 +54,7 @@ for arg in "$@"; do
     --no-export)     DO_EXPORT=0 ;;
     --check-only)    CHECK_ONLY=1 ;;
     --install-deps)  INSTALL_DEPS=1 ;;
+    --build-app)     BUILD_APP=1 ;;
     -h|--help)       print_help; exit 0 ;;
     *)
       echo "알 수 없는 옵션: $arg" >&2
@@ -60,6 +63,17 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+# --build-app는 GUI venv가 필수 선행. 두 옵션 같이 주면 충돌.
+if (( BUILD_APP && ! DO_GUI )); then
+  echo "옵션 충돌: --build-app은 --no-gui와 함께 쓸 수 없습니다." >&2
+  echo ".app 빌드에는 GUI venv(PyInstaller 포함)가 필요합니다." >&2
+  exit 2
+fi
+
+# 단계 표시 동적 — --build-app이면 [N/5], 아니면 [N/4].
+TOTAL_STEPS=4
+(( BUILD_APP )) && TOTAL_STEPS=5
 
 # ─────────────────────────────────────────────────────────────────
 # 색 출력 (TTY일 때만)
@@ -118,7 +132,7 @@ brew_install_or_advise() {
 
 MISSING=0
 
-step "[1/4] 사전 체크"
+step "[1/${TOTAL_STEPS}] 사전 체크"
 
 # macOS인가
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -208,7 +222,7 @@ fi
 # 2단계: plugin 빌드
 # ─────────────────────────────────────────────────────────────────
 
-step "[2/4] plugin 빌드 (macttssink GStreamer 플러그인)"
+step "[2/${TOTAL_STEPS}] plugin 빌드 (macttssink GStreamer 플러그인)"
 
 cd "$PROJECT_ROOT/plugin"
 
@@ -220,10 +234,10 @@ PKG_CONFIG_LIBDIR="$GST_PKGCONFIG_DIR" \
 
 ninja -C builddir
 
-if [[ -f "$PROJECT_ROOT/plugin/builddir/libgstmacttssink.dylib" ]]; then
-  ok "plugin 빌드 완료: plugin/builddir/libgstmacttssink.dylib"
+if [[ -f "$PROJECT_ROOT/plugin/builddir/gstmacttssink.dylib" ]]; then
+  ok "plugin 빌드 완료: plugin/builddir/gstmacttssink.dylib"
 else
-  fail "plugin 빌드 결과(libgstmacttssink.dylib)를 찾을 수 없습니다."
+  fail "plugin 빌드 결과(gstmacttssink.dylib)를 찾을 수 없습니다."
   exit 1
 fi
 
@@ -234,7 +248,7 @@ cd "$PROJECT_ROOT"
 # ─────────────────────────────────────────────────────────────────
 
 if (( DO_GUI )); then
-  step "[3/4] GUI 가상환경 + 의존성 설치"
+  step "[3/${TOTAL_STEPS}] GUI 가상환경 + 의존성 설치"
 
   cd "$PROJECT_ROOT/gui"
 
@@ -257,7 +271,7 @@ if (( DO_GUI )); then
 
   cd "$PROJECT_ROOT"
 else
-  step "[3/4] GUI 단계 건너뜀 (--no-gui)"
+  step "[3/${TOTAL_STEPS}] GUI 단계 건너뜀 (--no-gui)"
 fi
 
 # ─────────────────────────────────────────────────────────────────
@@ -265,7 +279,7 @@ fi
 # ─────────────────────────────────────────────────────────────────
 
 if (( DO_EXPORT )); then
-  step "[4/4] export 도구 빌드 (kb-tts-export)"
+  step "[4/${TOTAL_STEPS}] export 도구 빌드 (kb-tts-export)"
 
   cd "$PROJECT_ROOT/tools/kb-tts-export"
   make
@@ -279,7 +293,41 @@ if (( DO_EXPORT )); then
 
   cd "$PROJECT_ROOT"
 else
-  step "[4/4] export 도구 단계 건너뜀 (--no-export)"
+  step "[4/${TOTAL_STEPS}] export 도구 단계 건너뜀 (--no-export)"
+fi
+
+# ─────────────────────────────────────────────────────────────────
+# 5단계: PyInstaller로 .app 빌드 (--build-app 시에만)
+# ─────────────────────────────────────────────────────────────────
+
+if (( BUILD_APP )); then
+  step "[5/${TOTAL_STEPS}] PyInstaller로 .app 빌드"
+
+  cd "$PROJECT_ROOT/gui"
+
+  # subshell로 venv activate (스크립트의 셸을 오염시키지 않음)
+  (
+    # shellcheck disable=SC1091
+    source .venv/bin/activate
+    if ! command -v pyinstaller >/dev/null 2>&1; then
+      echo "pyinstaller가 venv에 없습니다." >&2
+      echo "requirements.txt를 다시 설치하세요: pip install -r requirements.txt" >&2
+      exit 1
+    fi
+    note "PyInstaller 실행 중 (.app에 plugin .dylib과 export 도구를 함께 묶습니다)..."
+    pyinstaller --noconfirm --log-level=WARN AnnoySpeaker.spec
+  )
+
+  APP_PATH="$PROJECT_ROOT/gui/dist/AnnoySpeaker.app"
+  if [[ -d "$APP_PATH" ]]; then
+    APP_SIZE="$(du -sh "$APP_PATH" | awk '{print $1}')"
+    ok ".app 빌드 완료: gui/dist/AnnoySpeaker.app (${APP_SIZE})"
+  else
+    fail ".app 빌드 결과를 찾을 수 없습니다 ($APP_PATH)."
+    exit 1
+  fi
+
+  cd "$PROJECT_ROOT"
 fi
 
 # ─────────────────────────────────────────────────────────────────
@@ -302,9 +350,20 @@ echo "    GST_PLUGIN_PATH=\"\$(pwd)/plugin/builddir\" \\"
 echo "    gst-launch-1.0 --quiet fdsrc ! 'text/x-raw,format=utf8' ! macttssink"
 echo
 if (( DO_GUI )); then
-  echo "  ${C_BOLD}# GUI 실행${C_RESET}"
+  echo "  ${C_BOLD}# GUI 실행 (venv 활성화 + Python)${C_RESET}"
   echo "  cd gui && source .venv/bin/activate && \\"
   echo "    GST_PLUGIN_PATH=\"\$(pwd)/../plugin/builddir\" python main.py"
+  echo
+fi
+if (( BUILD_APP )); then
+  echo "  ${C_BOLD}# .app을 Applications으로 복사 (Launchpad/Spotlight에서 검색·실행)${C_RESET}"
+  echo "  cp -R gui/dist/AnnoySpeaker.app /Applications/"
+  echo
+  echo "  ${C_BOLD}# 또는 더블클릭으로 바로 실행${C_RESET}"
+  echo "  open gui/dist/AnnoySpeaker.app"
+  echo
+  note "venv 활성화 없이 .app 더블클릭만으로 동작합니다 (PyInstaller가 Python·PySide6를 .app에 묶음)."
+  note "현재 앱 아이콘은 macOS 기본(회색)입니다. 아이콘 디자인은 별도 후속 작업."
   echo
 fi
 echo "자세한 옵션·트러블슈팅은 ${C_BOLD}BUILD.md${C_RESET} 참고."
