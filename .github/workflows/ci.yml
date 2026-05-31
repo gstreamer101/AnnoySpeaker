@@ -1,0 +1,55 @@
+# 가벼운 1차 CI — Linux 러너, GStreamer 없이.
+# 모든 PR과 main push에서 자동 실행. 1분 내 완료 목표.
+#
+# 검사 항목 (세 가지):
+#   1. ruff check + ruff format --check (Python 린트 + 포맷)
+#   2. python -m py_compile (Python 문법 스모크)
+#   3. scripts/check-spdx-headers.py (디렉터리별 SPDX 무결성)
+#
+# plugin C 컴파일은 GStreamer Framework가 필요하므로 2차 CI(#13)에서.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 같은 브랜치/PR에서 새 push가 오면 진행 중인 이전 실행 취소.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint + SPDX
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install --no-cache-dir ruff
+
+      - name: ruff check (Python lint)
+        run: ruff check gui/
+
+      - name: ruff format --check (Python format)
+        run: ruff format --check gui/
+
+      - name: py_compile (Python syntax smoke)
+        # *.spec 파일은 PyInstaller 전역 함수(Analysis 등) 때문에 제외.
+        # gui/main.py만 실제 Python 모듈로 컴파일.
+        run: python -m py_compile gui/main.py
+
+      - name: SPDX header integrity
+        # 모든 소스에 SPDX 헤더가 있는지 + 디렉터리별 라이선스와 ID가
+        # 일치하는지 검사. MIT 디렉터리에 LGPL 헤더가 박힌 파일이 섞여
+        # 들어오는 라이선스 오염을 자동 차단.
+        run: python3 scripts/check-spdx-headers.py

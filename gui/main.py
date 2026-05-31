@@ -230,11 +230,9 @@ class MainWindow(QMainWindow):
         sliders_layout.setContentsMargins(4, 4, 4, 4)
         sliders_layout.setSpacing(16)
 
-        self.rate_slider = LabeledSlider(
-            "속도", 0, 20, 10, formatter=lambda v: f"{v/10:.1f}x"
-        )
-        self.pitch_slider  = LabeledSlider("음높이", 50, 200, 100)
-        self.volume_slider = LabeledSlider("볼륨",   0, 100, 100)
+        self.rate_slider = LabeledSlider("속도", 0, 20, 10, formatter=lambda v: f"{v / 10:.1f}x")
+        self.pitch_slider = LabeledSlider("음높이", 50, 200, 100)
+        self.volume_slider = LabeledSlider("볼륨", 0, 100, 100)
 
         sliders_layout.addWidget(self.rate_slider)
         sliders_layout.addWidget(self.pitch_slider)
@@ -273,10 +271,10 @@ class MainWindow(QMainWindow):
 
         속도는 AVSpeech의 비선형성 때문에 ui_speed_to_rate()로 압축.
         """
-        ui_x   = self.rate_slider.value() / 10.0      # 0.0..2.0 (사용자 표시)
-        rate   = ui_speed_to_rate(ui_x)               # 0.00..0.70 (압축됨)
-        pitch  = self.pitch_slider.value()  / 100.0   # 0.50..2.00
-        volume = self.volume_slider.value() / 100.0   # 0.00..1.00
+        ui_x = self.rate_slider.value() / 10.0  # 0.0..2.0 (사용자 표시)
+        rate = ui_speed_to_rate(ui_x)  # 0.00..0.70 (압축됨)
+        pitch = self.pitch_slider.value() / 100.0  # 0.50..2.00
+        volume = self.volume_slider.value() / 100.0  # 0.00..1.00
         return rate, pitch, volume
 
     def _on_play(self) -> None:
@@ -308,9 +306,7 @@ class MainWindow(QMainWindow):
         # (stdin은 macOS pipe buffer(~16~64KB) + fdsrc 기본 청크(4KB)로 잘려 여러 utterance가
         # 되면서 청크 경계 처리에서 문제가 생김. filesrc + 큰 blocksize면 전체를 한 번에 읽음.)
         try:
-            tmp_fd, self._tmp_text_path = tempfile.mkstemp(
-                suffix=".txt", prefix="kb-tts-"
-            )
+            tmp_fd, self._tmp_text_path = tempfile.mkstemp(suffix=".txt", prefix="kb-tts-")
             with os.fdopen(tmp_fd, "wb") as f:
                 f.write(text.encode("utf-8"))
         except OSError as e:
@@ -362,9 +358,7 @@ class MainWindow(QMainWindow):
             return  # 이미 내보내는 중
 
         if not EXPORT_TOOL.exists():
-            self._fail(
-                f"export 도구가 없습니다. tools/kb-tts-export/ 에서 'make' 실행 필요."
-            )
+            self._fail("export 도구가 없습니다. tools/kb-tts-export/ 에서 'make' 실행 필요.")
             return
 
         text = preprocess_for_speech(self.text_edit.toPlainText())
@@ -388,10 +382,14 @@ class MainWindow(QMainWindow):
 
         rate, pitch, volume = self._slider_values()
         args = [
-            "--out", path,
-            "--rate", f"{rate:.2f}",
-            "--pitch", f"{pitch:.2f}",
-            "--volume", f"{volume:.2f}",
+            "--out",
+            path,
+            "--rate",
+            f"{rate:.2f}",
+            "--pitch",
+            f"{pitch:.2f}",
+            "--volume",
+            f"{volume:.2f}",
         ]
 
         proc = QProcess(self)
