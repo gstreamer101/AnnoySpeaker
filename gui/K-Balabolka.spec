@@ -1,4 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 dlgus8648
 
 
 a = Analysis(

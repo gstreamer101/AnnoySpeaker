@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 dlgus8648
+
 /* kb-tts-export: Synthesize stdin text to an .m4a file via AVSpeechSynthesizer.
  *
  * 텍스트가 매우 길면 AVSpeech의 writeUtterance:toBufferCallback:가 첫 buffer

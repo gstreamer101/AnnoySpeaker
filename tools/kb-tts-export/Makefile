@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 dlgus8648
+
 SRC := kb-tts-export.m
 BIN := kb-tts-export
 

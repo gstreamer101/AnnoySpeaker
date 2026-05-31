@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 dlgus8648
+
 """K-Balabolka GUI — PySide6 frontend over macttssink.
 
 Layout follows the Windows Balabolka style at a high level: toolbar with

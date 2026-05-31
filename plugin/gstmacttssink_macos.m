@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// Copyright (c) 2026 dlgus8648
+
 #import <AVFoundation/AVFoundation.h>
 #import <Foundation/Foundation.h>
 #include <stdlib.h>

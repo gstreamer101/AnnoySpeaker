@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (c) 2026 dlgus8648
+
 project('gst-macttssink-c', ['c', 'objc'],
   version : '0.2.0',
   default_options : [
