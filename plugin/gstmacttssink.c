@@ -268,7 +268,7 @@ GST_PLUGIN_DEFINE (
     "macOS TTS sink (C, AVSpeechSynthesizer)",
     plugin_init,
     "0.3.0",
-    "MIT/Apache-2.0",
+    "LGPL",
     PACKAGE,
     "https://github.com/gstreamer101/AnnoySpeaker"
 )
