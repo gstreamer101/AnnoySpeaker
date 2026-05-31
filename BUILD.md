@@ -4,6 +4,12 @@
 
 > **요점만 먼저:** GStreamer는 공식 `.pkg` Framework로 설치하고, plugin을 빌드할 때는 반드시 `PKG_CONFIG_PATH=""` + `PKG_CONFIG_LIBDIR=/Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig` 환경에서 Meson을 실행하세요. 이걸 안 하면 plugin이 빌드는 성공하지만 로드 시점에 `GObject NODE_REFCOUNT` 어설션으로 크래시합니다. 자세한 이유는 [§2.1](#21-왜-pkg_config-우회가-필요한가)에 있습니다.
 
+> **자동화 옵션:** 아래 §1~§4 절차를 한 번에 실행하는 스크립트가 있습니다.
+> ```bash
+> ./scripts/setup-dev.sh
+> ```
+> 사전 도구 점검 → plugin 빌드 → GUI venv + 의존성 설치 → export 도구 빌드까지 한 번에 진행합니다. `--check-only`(사전 점검만), `--no-gui`, `--no-export`, `--install-deps`(brew 패키지 자동 설치), `--help` 옵션을 지원합니다. **원리와 모든 옵션은 이 문서 본문**에 있으니, 스크립트가 실패하거나 비표준 환경을 쓰는 경우엔 아래를 참고하세요.
+
 ---
 
 ## 1. 사전 요구 사항
