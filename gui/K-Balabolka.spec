@@ -48,5 +48,5 @@ app = BUNDLE(
     coll,
     name='K-Balabolka.app',
     icon=None,
-    bundle_identifier='com.example.kbalabolka',
+    bundle_identifier='io.github.gstreamer101.korean-tts',
 )
