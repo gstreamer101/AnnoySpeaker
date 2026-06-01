@@ -4,8 +4,8 @@
 """AnnoySpeaker GUI — PySide6 frontend over pluggable TTS engines.
 
 Layout follows the Windows Balabolka style at a high level: toolbar with
-play/stop/export, an engine selector combobox, rate/pitch/volume sliders,
-a large text edit, and a status bar.
+play/stop/export, an engine selector combobox, a voice selector combobox,
+rate/pitch/volume sliders, a large text edit, and a status bar.
 
 The engine combobox is backed by the ENGINES registry — selecting an entry
 swaps the GStreamer sink element used for playback and the export tool used
@@ -13,14 +13,17 @@ for m4a save. Currently AVSpeechSynthesizer (macttssink) is the only engine;
 the registry is structured so additional macOS TTS APIs wrapped as GStreamer
 sink plugins can be added with a single entry.
 
-Voice selection (per-engine) is exposed on the plugin side but not yet in
-the GUI (next iteration).
+The voice combobox is filled per-engine from `voice_list_tool --list-voices`
+(for AVSpeech, the kb-tts-export binary). On macOS each voice is bound to a
+language, so the list is sorted by language; the selected voice identifier is
+passed to both playback (the sink's `voice` property) and export (`--voice`).
 """
 
 from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -92,16 +95,20 @@ _INLINE_WHITESPACE = re.compile(r"[ \t]+")
 class Engine:
     """선택 가능한 TTS 엔진 하나.
 
-    id:           내부 식별자
-    display_name: 콤보박스에 보일 이름
-    sink_element: 재생 파이프라인에서 쓸 GStreamer sink 엘리먼트 이름
-    export_tool:  m4a export 실행 파일 경로 (None = 이 엔진은 export 미지원)
+    id:              내부 식별자
+    display_name:    콤보박스에 보일 이름
+    sink_element:    재생 파이프라인에서 쓸 GStreamer sink 엘리먼트 이름
+    export_tool:     m4a export 실행 파일 경로 (None = export 미지원)
+    voice_list_tool: 설치된 음성 목록을 출력하는 도구 경로
+                     (`<tool> --list-voices` → "id\\tname\\tlang\\tquality" 줄들).
+                     None = 보이스 열거 미지원 (드롭다운에 "시스템 기본"만).
     """
 
     id: str
     display_name: str
     sink_element: str
     export_tool: Path | None
+    voice_list_tool: Path | None
 
 
 ENGINES: list[Engine] = [
@@ -110,6 +117,9 @@ ENGINES: list[Engine] = [
         display_name="macOS AVSpeechSynthesizer",
         sink_element="macttssink",
         export_tool=EXPORT_TOOL,
+        # AVSpeech 음성 열거는 export 도구의 --list-voices를 재사용
+        # (같은 AVFoundation 바이너리라 .app에 이미 번들됨).
+        voice_list_tool=EXPORT_TOOL,
     ),
     # 다음 엔진 예시 (구현되면 주석 해제):
     # Engine(
@@ -117,8 +127,31 @@ ENGINES: list[Engine] = [
     #     display_name="macOS NSSpeechSynthesizer (클래식 보이스)",
     #     sink_element="macnsttssink",          # 별도 GStreamer 플러그인 필요
     #     export_tool=NS_EXPORT_TOOL,           # 별도 export 도구 필요
+    #     voice_list_tool=NS_EXPORT_TOOL,
     # ),
 ]
+
+
+# 음성 드롭다운에 노출할 음성을 고르는 두 가지 기준 (둘 중 하나면 노출).
+#
+# 1) DOWNLOADED_VOICE_QUALITIES — 사용자가 직접 받은 고품질 음성.
+#    macOS는 모든 언어의 compact 음성(품질 "default")과 옛 노벨티 음성을
+#    기본 탑재하는데(수십 개의 잡음), enhanced(고음질)/premium(프리미엄)은
+#    시스템 설정에서 받아야만 생긴다. 이 등급은 "사용자가 받은 것"이라
+#    이름을 몰라도 자동 노출된다 → 각자 받은 음성만 깔끔하게 보인다.
+#
+# 2) BASELINE_VOICE_NAMES — 항상 보여줄 기본 음성. 프리미엄을 하나도 안
+#    받은 사용자도 바로 쓸 수 있도록, macOS에 항상 기본 탑재되는 한국어
+#    Yuna / 영어 Samantha만 남긴다 (나머지 언어 compact·노벨티는 숨김).
+#    이 둘은 모든 맥에 존재하므로 이름 하드코딩이 안전하다.
+#
+# 결과: "기본 Yuna·Samantha + 내가 받은 고품질 음성"만 보이고 나머진 숨김.
+DOWNLOADED_VOICE_QUALITIES = {"enhanced", "premium"}
+BASELINE_VOICE_NAMES = {"Samantha", "Yuna"}
+
+# 처음에 선택해 둘 음성 이름(접두 일치). 한국어 사용자가 주 대상이라 Yuna를
+# 기본으로 — 설치돼 있으면 최고 품질 Yuna(프리미엄)를 고르고, 없으면 첫 항목.
+DEFAULT_VOICE_NAME = "Yuna"
 
 
 def ui_speed_to_rate(ui_x: float) -> float:
@@ -217,6 +250,7 @@ class MainWindow(QMainWindow):
         self._export_process: QProcess | None = None
         self._tmp_text_path: str | None = None
         self._current_engine: Engine = ENGINES[0]
+        self._has_voices: bool = False
 
         self._build_toolbar()
         self._build_central()
@@ -295,6 +329,27 @@ class MainWindow(QMainWindow):
         engine_row_layout.addWidget(self.engine_combo, stretch=1)
         layout.addWidget(engine_row)
 
+        # 음성 선택 row: "음성:" 라벨 + 콤보박스 (Balabolka의 voice 드롭다운에 해당)
+        # 음성은 언어에 묶여 있다 — 한국어 텍스트엔 한국어 음성(Yuna), 영어엔
+        # 영어 음성(Samantha 등). 선택 엔진이 바뀌면 목록을 다시 채운다.
+        voice_row = QWidget()
+        voice_row_layout = QHBoxLayout(voice_row)
+        voice_row_layout.setContentsMargins(4, 2, 4, 2)
+        voice_row_layout.setSpacing(8)
+
+        voice_caption = QLabel("음성:")
+        voice_caption.setStyleSheet("color: #555;")
+
+        self.voice_combo = QComboBox()
+        self.voice_combo.setToolTip(
+            "읽을 음성 선택. 텍스트 언어에 맞는 음성을 고르세요 "
+            "(예: 한국어 → Yuna)."
+        )
+
+        voice_row_layout.addWidget(voice_caption)
+        voice_row_layout.addWidget(self.voice_combo, stretch=1)
+        layout.addWidget(voice_row)
+
         # 슬라이더 row: 속도 / 음높이 / 볼륨
         # 내부 값(정수) → 표시 → plugin float 매핑:
         #   속도   0..20  → "0.0x"..."2.0x"  → rate   v/20   (0.00..1.00)
@@ -362,6 +417,70 @@ class MainWindow(QMainWindow):
             if export_ok
             else "이 엔진은 m4a 내보내기를 지원하지 않습니다."
         )
+
+        # 엔진별 음성 목록 갱신
+        self._populate_voices()
+
+    def _populate_voices(self) -> None:
+        """선택 엔진의 설치 음성으로 음성 콤보박스를 채운다.
+
+        `voice_list_tool --list-voices` 출력(id\\tname\\tlang\\tquality)을
+        파싱하고, PREFERRED_VOICE_NAMES(자연 음성 화이트리스트)로 걸러
+        언어→이름 순으로 넣는다. 화이트리스트 음성이 하나도 없으면(도구
+        실패 또는 미설치) "시스템 기본"으로 폴백한다.
+        """
+        self.voice_combo.clear()
+
+        tool = self._current_engine.voice_list_tool
+        voices: list[tuple[str, str, str, str]] = []  # (lang, name, identifier, quality)
+        if tool is not None and tool.exists():
+            try:
+                result = subprocess.run(
+                    [str(tool), "--list-voices"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                for line in result.stdout.splitlines():
+                    parts = line.split("\t")
+                    if len(parts) >= 4:
+                        ident, name, lang, quality = parts[0], parts[1], parts[2], parts[3]
+                        # 받은 고품질 음성(enhanced/premium) + 기본 baseline
+                        # (Yuna/Samantha)만 노출. 나머지 언어 compact·노벨티 숨김.
+                        if quality in DOWNLOADED_VOICE_QUALITIES or name in BASELINE_VOICE_NAMES:
+                            voices.append((lang, name, ident, quality))
+            except (OSError, subprocess.SubprocessError):
+                pass  # 실패해도 아래 폴백으로 계속 동작
+
+        # 언어별로 묶여 보이도록 (lang, name) 정렬
+        voices.sort(key=lambda v: (v[0], v[1].lower()))
+        for lang, name, ident, _quality in voices:
+            # name이 이미 "(Premium)"/"(Enhanced)"를 포함하므로 그대로 표시
+            self.voice_combo.addItem(f"{name} · {lang}", ident)
+
+        # 기본 선택: 이름이 DEFAULT_VOICE_NAME으로 시작하는 음성 중 최고 품질
+        # (프리미엄 Yuna가 깔려 있으면 그것, 아니면 compact Yuna)
+        quality_rank = {"premium": 3, "enhanced": 2, "default": 1}
+        best_ident, best_rank = None, -1
+        for _lang, name, ident, quality in voices:
+            if name.startswith(DEFAULT_VOICE_NAME):
+                rank = quality_rank.get(quality, 0)
+                if rank > best_rank:
+                    best_rank, best_ident = rank, ident
+
+        # 음성이 하나도 없으면 시스템 기본으로 폴백
+        self._has_voices = self.voice_combo.count() > 0
+        if not self._has_voices:
+            self.voice_combo.addItem("시스템 기본", None)
+        self.voice_combo.setEnabled(self._has_voices)
+        if best_ident is not None:
+            idx = self.voice_combo.findData(best_ident)
+            if idx >= 0:
+                self.voice_combo.setCurrentIndex(idx)
+
+    def _selected_voice(self) -> str | None:
+        """현재 선택된 음성 identifier. "시스템 기본"이면 None."""
+        return self.voice_combo.currentData()
 
     def _slider_values(self) -> tuple[float, float, float]:
         """슬라이더 정수값을 plugin이 받는 float로 매핑.
@@ -433,6 +552,9 @@ class MainWindow(QMainWindow):
             f"pitch={pitch:.2f}",
             f"volume={volume:.2f}",
         ]
+        voice = self._selected_voice()
+        if voice:
+            args.append(f"voice={voice}")
 
         self._process = proc
         proc.start(GST_LAUNCH, args)
@@ -445,6 +567,7 @@ class MainWindow(QMainWindow):
         self.play_action.setEnabled(False)
         self.stop_action.setEnabled(True)
         self.engine_combo.setEnabled(False)
+        self.voice_combo.setEnabled(False)
         ui_x = self.rate_slider.value() / 10.0
         self.status_label.setText(
             f"재생 중… (속도 {ui_x:.1f}x · rate {rate:.2f}, "
@@ -495,6 +618,9 @@ class MainWindow(QMainWindow):
             "--volume",
             f"{volume:.2f}",
         ]
+        voice = self._selected_voice()
+        if voice:
+            args += ["--voice", voice]
 
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -515,6 +641,7 @@ class MainWindow(QMainWindow):
 
         self.export_action.setEnabled(False)
         self.engine_combo.setEnabled(False)
+        self.voice_combo.setEnabled(False)
         self.status_label.setText(f"내보내는 중… → {path}")
 
     def _on_export_finished(
@@ -523,6 +650,7 @@ class MainWindow(QMainWindow):
         self._export_process = None
         self.export_action.setEnabled(True)
         self.engine_combo.setEnabled(True)
+        self.voice_combo.setEnabled(self._has_voices)
         if exit_status == QProcess.ExitStatus.CrashExit:
             self.status_label.setText("내보내기 중단됨")
         elif exit_code != 0:
@@ -552,6 +680,7 @@ class MainWindow(QMainWindow):
         self.play_action.setEnabled(True)
         self.stop_action.setEnabled(False)
         self.engine_combo.setEnabled(True)
+        self.voice_combo.setEnabled(self._has_voices)
         if exit_status == QProcess.ExitStatus.CrashExit:
             self.status_label.setText("정지됨")
         elif exit_code != 0:
@@ -567,6 +696,7 @@ class MainWindow(QMainWindow):
         self.play_action.setEnabled(True)
         self.stop_action.setEnabled(False)
         self.engine_combo.setEnabled(True)
+        self.voice_combo.setEnabled(self._has_voices)
 
 
 def main() -> int:

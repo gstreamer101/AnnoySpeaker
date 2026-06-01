@@ -36,8 +36,34 @@ print_usage (const char *prog)
       "  --volume <0.0-1.0>  volume (default 1.0)\n"
       "  --voice <id>        voice identifier or BCP-47 language code\n"
       "                      e.g. \"ko-KR\" or\n"
-      "                           \"com.apple.voice.compact.ko-KR.Yuna\"\n",
+      "                           \"com.apple.voice.compact.ko-KR.Yuna\"\n"
+      "  --list-voices       print installed voices and exit. One per line:\n"
+      "                      <identifier>\\t<name>\\t<language>\\t<quality>\n",
       prog);
+}
+
+/* 설치된 AVSpeech 음성을 한 줄에 하나씩 stdout으로 출력.
+ * 형식: identifier<TAB>name<TAB>language<TAB>quality
+ * quality: default | enhanced | premium.
+ * GUI가 이 출력을 파싱해 음성 선택 드롭다운을 채운다. */
+static int
+list_voices (void)
+{
+  for (AVSpeechSynthesisVoice *v in [AVSpeechSynthesisVoice speechVoices]) {
+    /* quality는 NSInteger: 1=Default, 2=Enhanced, 3=Premium.
+     * Premium 심볼을 직접 참조하면 -Wunguarded-availability가 뜰 수 있어
+     * 정수값으로 비교한다. */
+    const char *quality = "default";
+    if ((long) v.quality == 2) {
+      quality = "enhanced";
+    } else if ((long) v.quality >= 3) {
+      quality = "premium";
+    }
+    fprintf (stdout, "%s\t%s\t%s\t%s\n",
+        v.identifier.UTF8String, v.name.UTF8String,
+        v.language.UTF8String, quality);
+  }
+  return 0;
 }
 
 static NSString *
@@ -293,6 +319,8 @@ main (int argc, const char *argv[])
         volume = (float) atof (argv[++i]);
       } else if (([arg isEqualToString:@"--voice"]) && i + 1 < argc) {
         voice_id = @(argv[++i]);
+      } else if ([arg isEqualToString:@"--list-voices"]) {
+        return list_voices ();
       } else if ([arg isEqualToString:@"-h"] || [arg isEqualToString:@"--help"]) {
         print_usage (argv[0]);
         return 0;
