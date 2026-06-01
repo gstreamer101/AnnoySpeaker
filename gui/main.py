@@ -342,8 +342,7 @@ class MainWindow(QMainWindow):
 
         self.voice_combo = QComboBox()
         self.voice_combo.setToolTip(
-            "읽을 음성 선택. 텍스트 언어에 맞는 음성을 고르세요 "
-            "(예: 한국어 → Yuna)."
+            "읽을 음성 선택. 텍스트 언어에 맞는 음성을 고르세요 (예: 한국어 → Yuna)."
         )
 
         voice_row_layout.addWidget(voice_caption)
