@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 dlgus8648
 
-"""AnnoySpeaker GUI — PySide6 frontend over macttssink.
+"""AnnoySpeaker GUI — PySide6 frontend over pluggable TTS engines.
 
 Layout follows the Windows Balabolka style at a high level: toolbar with
-play/stop, an engine info label, rate/pitch/volume sliders, a large text
-edit, and a status bar.
+play/stop/export, an engine selector combobox, rate/pitch/volume sliders,
+a large text edit, and a status bar.
 
-Stage 3 added the rate/pitch/volume sliders; voice selection is exposed
-on the plugin side but not yet in the GUI (next iteration).
+The engine combobox is backed by the ENGINES registry — selecting an entry
+swaps the GStreamer sink element used for playback and the export tool used
+for m4a save. Currently AVSpeechSynthesizer (macttssink) is the only engine;
+the registry is structured so additional macOS TTS APIs wrapped as GStreamer
+sink plugins can be added with a single entry.
+
+Voice selection (per-engine) is exposed on the plugin side but not yet in
+the GUI (next iteration).
 """
 
 from __future__ import annotations
@@ -17,12 +23,14 @@ import os
 import re
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -61,6 +69,56 @@ GST_LAUNCH = "/Library/Frameworks/GStreamer.framework/Versions/1.0/bin/gst-launc
 # 문장 종결로 인정하는 문자 (이미 끝나있으면 마침표 중복 안 붙임)
 _TERMINATORS = ".!?…。！？"
 _INLINE_WHITESPACE = re.compile(r"[ \t]+")
+
+
+# ---- TTS 엔진 레지스트리 ---------------------------------------------------
+#
+# Balabolka가 SAPI4 / SAPI5 / MS Speech Platform을 갈아끼우듯, AnnoySpeaker도
+# "엔진"을 콤보박스로 고를 수 있게 한다. 한 엔진 = (재생용 GStreamer sink
+# 엘리먼트) + (m4a export 도구) 한 쌍. 콤보박스에서 엔진을 바꾸면 재생
+# 파이프라인의 sink 엘리먼트와 export 도구가 통째로 교체된다.
+#
+# 지금은 macOS AVSpeechSynthesizer(macttssink) 하나뿐이지만, 다른 macOS TTS
+# API(예: NSSpeechSynthesizer)를 GStreamer sink 플러그인 + export 경로로
+# 감싸 이 리스트에 dict 하나 추가하면 콤보박스에 자동으로 나타난다.
+#
+# 확장 포인트: 엔진마다 지원하는 속성(rate/pitch/volume)이나 그 단위가
+# 다를 수 있다. 현재는 모든 엔진이 macttssink와 동일한 rate/pitch/volume
+# float 속성을 받는다고 가정한다. 엔진별 속성 매핑이 필요해지면 Engine에
+# 필드를 추가한다.
+
+
+@dataclass(frozen=True)
+class Engine:
+    """선택 가능한 TTS 엔진 하나.
+
+    id:           내부 식별자
+    display_name: 콤보박스에 보일 이름
+    sink_element: 재생 파이프라인에서 쓸 GStreamer sink 엘리먼트 이름
+    export_tool:  m4a export 실행 파일 경로 (None = 이 엔진은 export 미지원)
+    """
+
+    id: str
+    display_name: str
+    sink_element: str
+    export_tool: Path | None
+
+
+ENGINES: list[Engine] = [
+    Engine(
+        id="avspeech",
+        display_name="macOS AVSpeechSynthesizer",
+        sink_element="macttssink",
+        export_tool=EXPORT_TOOL,
+    ),
+    # 다음 엔진 예시 (구현되면 주석 해제):
+    # Engine(
+    #     id="nsspeech",
+    #     display_name="macOS NSSpeechSynthesizer (클래식 보이스)",
+    #     sink_element="macnsttssink",          # 별도 GStreamer 플러그인 필요
+    #     export_tool=NS_EXPORT_TOOL,           # 별도 export 도구 필요
+    # ),
+]
 
 
 def ui_speed_to_rate(ui_x: float) -> float:
@@ -158,12 +216,14 @@ class MainWindow(QMainWindow):
         self._process: QProcess | None = None
         self._export_process: QProcess | None = None
         self._tmp_text_path: str | None = None
+        self._current_engine: Engine = ENGINES[0]
 
         self._build_toolbar()
         self._build_central()
         self._build_statusbar()
 
         self._update_char_count()
+        self._on_engine_changed(0)
 
     # ---- UI construction ---------------------------------------------------
 
@@ -216,9 +276,24 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        engine_label = QLabel("엔진: macOS AVSpeechSynthesizer (macttssink)")
-        engine_label.setStyleSheet("color: #555; padding: 2px 4px;")
-        layout.addWidget(engine_label)
+        # 엔진 선택 row: "엔진:" 라벨 + 콤보박스 (Balabolka의 엔진 탭에 해당)
+        engine_row = QWidget()
+        engine_row_layout = QHBoxLayout(engine_row)
+        engine_row_layout.setContentsMargins(4, 2, 4, 2)
+        engine_row_layout.setSpacing(8)
+
+        engine_caption = QLabel("엔진:")
+        engine_caption.setStyleSheet("color: #555;")
+
+        self.engine_combo = QComboBox()
+        for engine in ENGINES:
+            self.engine_combo.addItem(engine.display_name, engine.id)
+        self.engine_combo.setToolTip("음성 합성에 사용할 TTS 엔진 선택")
+        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+
+        engine_row_layout.addWidget(engine_caption)
+        engine_row_layout.addWidget(self.engine_combo, stretch=1)
+        layout.addWidget(engine_row)
 
         # 슬라이더 row: 속도 / 음높이 / 볼륨
         # 내부 값(정수) → 표시 → plugin float 매핑:
@@ -265,6 +340,28 @@ class MainWindow(QMainWindow):
     def _update_char_count(self) -> None:
         n = len(self.text_edit.toPlainText())
         self.char_label.setText(f"글자: {n}")
+
+    def _on_engine_changed(self, index: int) -> None:
+        """콤보박스에서 엔진을 바꾸면 현재 엔진을 교체하고 UI를 갱신.
+
+        재생 파이프라인의 sink 엘리먼트와 export 도구가 이 엔진을 따라간다.
+        """
+        if not (0 <= index < len(ENGINES)):
+            return
+        self._current_engine = ENGINES[index]
+
+        # 상태바에 현재 엔진의 sink 엘리먼트 이름 표시
+        self.engine_status.setText(self._current_engine.sink_element)
+
+        # export 도구가 없는(또는 빌드 안 된) 엔진이면 내보내기 비활성화
+        tool = self._current_engine.export_tool
+        export_ok = tool is not None and tool.exists()
+        self.export_action.setEnabled(export_ok)
+        self.export_action.setToolTip(
+            "현재 텍스트와 슬라이더 설정대로 .m4a 음성 파일로 저장 (Cmd+S)"
+            if export_ok
+            else "이 엔진은 m4a 내보내기를 지원하지 않습니다."
+        )
 
     def _slider_values(self) -> tuple[float, float, float]:
         """슬라이더 정수값을 plugin이 받는 float로 매핑.
@@ -331,7 +428,7 @@ class MainWindow(QMainWindow):
             "!",
             "text/x-raw,format=utf8",
             "!",
-            "macttssink",
+            self._current_engine.sink_element,
             f"rate={rate:.2f}",
             f"pitch={pitch:.2f}",
             f"volume={volume:.2f}",
@@ -347,6 +444,7 @@ class MainWindow(QMainWindow):
 
         self.play_action.setEnabled(False)
         self.stop_action.setEnabled(True)
+        self.engine_combo.setEnabled(False)
         ui_x = self.rate_slider.value() / 10.0
         self.status_label.setText(
             f"재생 중… (속도 {ui_x:.1f}x · rate {rate:.2f}, "
@@ -357,7 +455,13 @@ class MainWindow(QMainWindow):
         if self._export_process is not None:
             return  # 이미 내보내는 중
 
-        if not EXPORT_TOOL.exists():
+        export_tool = self._current_engine.export_tool
+        if export_tool is None:
+            self._fail(
+                f"'{self._current_engine.display_name}' 엔진은 m4a 내보내기를 지원하지 않습니다."
+            )
+            return
+        if not export_tool.exists():
             self._fail("export 도구가 없습니다. tools/kb-tts-export/ 에서 'make' 실행 필요.")
             return
 
@@ -400,7 +504,7 @@ class MainWindow(QMainWindow):
         proc.errorOccurred.connect(self._on_error)
 
         self._export_process = proc
-        proc.start(str(EXPORT_TOOL), args)
+        proc.start(str(export_tool), args)
         if not proc.waitForStarted(3000):
             self._fail("kb-tts-export 시작 실패")
             self._export_process = None
@@ -410,6 +514,7 @@ class MainWindow(QMainWindow):
         proc.closeWriteChannel()
 
         self.export_action.setEnabled(False)
+        self.engine_combo.setEnabled(False)
         self.status_label.setText(f"내보내는 중… → {path}")
 
     def _on_export_finished(
@@ -417,6 +522,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         self._export_process = None
         self.export_action.setEnabled(True)
+        self.engine_combo.setEnabled(True)
         if exit_status == QProcess.ExitStatus.CrashExit:
             self.status_label.setText("내보내기 중단됨")
         elif exit_code != 0:
@@ -445,6 +551,7 @@ class MainWindow(QMainWindow):
         self._cleanup_tmp_text()
         self.play_action.setEnabled(True)
         self.stop_action.setEnabled(False)
+        self.engine_combo.setEnabled(True)
         if exit_status == QProcess.ExitStatus.CrashExit:
             self.status_label.setText("정지됨")
         elif exit_code != 0:
@@ -459,6 +566,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         self.play_action.setEnabled(True)
         self.stop_action.setEnabled(False)
+        self.engine_combo.setEnabled(True)
 
 
 def main() -> int:
