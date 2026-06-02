@@ -10,6 +10,8 @@
 @interface KbTtsDelegate : NSObject <AVSpeechSynthesizerDelegate>
 @property (nonatomic, strong) NSCondition *cond;
 @property (nonatomic, assign) BOOL done;
+@property (nonatomic, assign) BOOL cancelled;      /* stop 시 청크 루프 중단 */
+@property (nonatomic, assign) NSUInteger chunkBase; /* 현재 청크의 전체 문자열 내 시작(UTF-16) */
 @property (nonatomic, assign) mac_tts_word_cb wordCb;
 @property (nonatomic, assign) void *wordCbUser;
 @end
@@ -55,7 +57,9 @@
   (void) synthesizer;
   (void) utterance;
   if (_wordCb) {
-    _wordCb (_wordCbUser, (unsigned int) characterRange.location,
+    /* 청크(문장) 단위로 말하므로 범위는 청크 기준 → 전체 문자열 기준으로
+     * 보정(chunkBase). 그래야 GUI가 원본 위치로 되돌릴 수 있다. */
+    _wordCb (_wordCbUser, (unsigned int) (_chunkBase + characterRange.location),
         (unsigned int) characterRange.length);
   }
 }
@@ -152,10 +156,59 @@ mac_tts_cancel (mac_tts_ctx *ctx)
      * 영영 안 깨지는 데드락. 그래서 콜백에 의존하지 않고 대기 중인 render()를
      * 여기서 직접 깨운다. (뒤늦게 didCancel이 와도 done은 이미 YES라 무해.) */
     [handle.delegate.cond lock];
+    handle.delegate.cancelled = YES;  /* 청크 루프도 중단 */
     handle.delegate.done = YES;
     [handle.delegate.cond signal];
     [handle.delegate.cond unlock];
   }
+}
+
+/* 텍스트를 문장 단위 청크(전체 문자열 내 NSRange)로 분할.
+ * AVSpeech는 긴 단일 발화엔 willSpeakRange를 "전체 범위"로만 줘서(실측)
+ * 단어 하이라이트가 안 된다. 문장처럼 짧게 쪼개 발화하면 단어별 범위가
+ * 나온다. 종결부호(.!?…) 직후에서 끊고, 한 문장이 MAX를 넘으면 공백에서
+ * 강제 분할. 종결부호 뒤 공백은 그 청크에 포함. */
+static NSArray<NSValue *> *
+kb_split_sentences (NSString *text)
+{
+  const NSUInteger MAX = 80;  /* 이보다 길면 AVSpeech가 전체범위로 보고할 위험 */
+  NSCharacterSet *enders =
+      [NSCharacterSet characterSetWithCharactersInString:@".!?…。！？"];
+  NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
+  NSMutableArray<NSValue *> *out = [NSMutableArray array];
+  NSUInteger n = text.length;
+  NSUInteger start = 0;
+  NSUInteger i = 0;
+
+  while (i < n) {
+    unichar c = [text characterAtIndex:i];
+    if ([enders characterIsMember:c]) {
+      NSUInteger end = i + 1;
+      while (end < n && [ws characterIsMember:[text characterAtIndex:end]]) {
+        end++;
+      }
+      [out addObject:[NSValue valueWithRange:NSMakeRange (start, end - start)]];
+      start = end;
+      i = end;
+    } else if (i - start + 1 >= MAX) {
+      /* 너무 긴 문장 — 마지막 공백에서 끊기, 없으면 강제 */
+      NSRange sp = [text rangeOfCharacterFromSet:ws
+                                         options:NSBackwardsSearch
+                                           range:NSMakeRange (start, i - start + 1)];
+      NSUInteger cut = (sp.location != NSNotFound && sp.location > start)
+                           ? sp.location + 1
+                           : i + 1;
+      [out addObject:[NSValue valueWithRange:NSMakeRange (start, cut - start)]];
+      start = cut;
+      i = cut;
+    } else {
+      i++;
+    }
+  }
+  if (start < n) {
+    [out addObject:[NSValue valueWithRange:NSMakeRange (start, n - start)]];
+  }
+  return out;
 }
 
 int
@@ -173,49 +226,70 @@ mac_tts_speak (mac_tts_ctx *ctx, const char *utf8_text,
       return -1;
     }
 
-    /* 이번 utterance 동안만 단어 콜백 활성화 */
-    handle.delegate.wordCb = word_cb;
-    handle.delegate.wordCbUser = word_cb_user;
-
-    AVSpeechUtterance *utterance = [AVSpeechUtterance speechUtteranceWithString:text];
-
-    /* AVSpeech의 didFinishSpeechUtterance: 콜백이 audio buffer flush보다
-     * 먼저 호출되는 경우가 있어 마지막 음절(특히 한국어 받침)이 잘림.
-     * postUtteranceDelay로 콜백을 늦춰 audio가 완전히 끝날 시간을 확보. */
-    utterance.postUtteranceDelay = 0.25;
-
-    if (opts) {
-      utterance.rate            = opts->rate;
-      utterance.pitchMultiplier = opts->pitch;
-      utterance.volume          = opts->volume;
-
-      if (opts->voice_id && opts->voice_id[0] != '\0') {
-        NSString *vid = [NSString stringWithUTF8String:opts->voice_id];
-        if (vid) {
-          /* identifier (dotted form) 우선, 실패 시 language code로 fallback */
-          AVSpeechSynthesisVoice *voice =
-              [AVSpeechSynthesisVoice voiceWithIdentifier:vid];
-          if (!voice) {
-            voice = [AVSpeechSynthesisVoice voiceWithLanguage:vid];
-          }
-          if (voice) {
-            utterance.voice = voice;
-          }
+    /* voice는 1회만 해석 (모든 청크 공통) */
+    AVSpeechSynthesisVoice *voice = nil;
+    if (opts && opts->voice_id && opts->voice_id[0] != '\0') {
+      NSString *vid = [NSString stringWithUTF8String:opts->voice_id];
+      if (vid) {
+        /* identifier (dotted form) 우선, 실패 시 language code로 fallback */
+        voice = [AVSpeechSynthesisVoice voiceWithIdentifier:vid];
+        if (!voice) {
+          voice = [AVSpeechSynthesisVoice voiceWithLanguage:vid];
         }
       }
     }
 
-    [handle.delegate.cond lock];
-    handle.delegate.done = NO;
-    [handle.delegate.cond unlock];
+    handle.delegate.wordCb = word_cb;
+    handle.delegate.wordCbUser = word_cb_user;
+    handle.delegate.cancelled = NO;
 
-    [handle.synth speakUtterance:utterance];
+    /* 문장 단위로 쪼개 순차 발화 — 짧은 발화라야 willSpeakRange가 단어별
+     * 범위를 준다 (긴 단일 발화는 전체범위만 줌). 각 청크의 시작 위치를
+     * chunkBase로 넘겨 단어 범위를 전체 문자열 기준으로 보정. */
+    NSArray<NSValue *> *chunks = kb_split_sentences (text);
+    for (NSValue *cv in chunks) {
+      NSRange cr = cv.rangeValue;
+      if (handle.delegate.cancelled) {
+        break;
+      }
+      NSString *chunk = [text substringWithRange:cr];
+      if ([chunk stringByTrimmingCharactersInSet:
+                     [NSCharacterSet whitespaceCharacterSet]].length == 0) {
+        continue;  /* 공백뿐인 청크 skip */
+      }
 
-    [handle.delegate.cond lock];
-    while (!handle.delegate.done) {
-      [handle.delegate.cond wait];
+      AVSpeechUtterance *utterance =
+          [AVSpeechUtterance speechUtteranceWithString:chunk];
+      /* didFinish가 audio flush보다 먼저 와서 마지막 음절(한국어 받침)이
+       * 잘리는 것 방지 — 각 청크 끝에 짧은 지연. */
+      utterance.postUtteranceDelay = 0.25;
+      if (opts) {
+        utterance.rate            = opts->rate;
+        utterance.pitchMultiplier = opts->pitch;
+        utterance.volume          = opts->volume;
+      }
+      if (voice) {
+        utterance.voice = voice;
+      }
+
+      handle.delegate.chunkBase = cr.location;
+
+      [handle.delegate.cond lock];
+      handle.delegate.done = NO;
+      [handle.delegate.cond unlock];
+
+      [handle.synth speakUtterance:utterance];
+
+      [handle.delegate.cond lock];
+      while (!handle.delegate.done) {
+        [handle.delegate.cond wait];
+      }
+      [handle.delegate.cond unlock];
+
+      if (handle.delegate.cancelled) {
+        break;
+      }
     }
-    [handle.delegate.cond unlock];
 
     handle.delegate.wordCb = NULL;
     handle.delegate.wordCbUser = NULL;

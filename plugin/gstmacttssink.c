@@ -199,9 +199,10 @@ gst_mac_tts_sink_render (GstBaseSink * sink, GstBuffer * buffer)
       .volume   = self->volume,
       .voice_id = self->voice,
     };
-    g_print ("[macttssink] speaking (%zu bytes, rate=%.2f pitch=%.2f vol=%.2f voice=%s): %s\n",
+    GST_DEBUG_OBJECT (self,
+        "speaking (%zu bytes, rate=%.2f pitch=%.2f vol=%.2f voice=%s)",
         strlen (text), opts.rate, opts.pitch, opts.volume,
-        opts.voice_id ? opts.voice_id : "(default)", text);
+        opts.voice_id ? opts.voice_id : "(default)");
 
     if (self->tts && mac_tts_speak (self->tts, text, &opts,
             gst_mac_tts_sink_on_word, self) != 0) {
