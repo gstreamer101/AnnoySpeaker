@@ -29,8 +29,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QProcessEnvironment, Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QObject, QProcess, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QStatusBar,
     QStyle,
+    QTextEdit,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -65,13 +66,49 @@ else:
     PLUGIN_DIR = PROJECT_ROOT / "plugin" / "builddir"
     EXPORT_TOOL = PROJECT_ROOT / "tools" / "kb-tts-export" / "kb-tts-export"
 
-# GStreamer Framework는 시스템 의존 (번들 안 함). 사용자의 맥북에
-# 공식 .pkg가 깔려있어야 동작.
-GST_LAUNCH = "/Library/Frameworks/GStreamer.framework/Versions/1.0/bin/gst-launch-1.0"
+# GStreamer Framework는 시스템 의존 (번들 안 함). 공식 .pkg 필요.
+GSTREAMER_FRAMEWORK = Path("/Library/Frameworks/GStreamer.framework/Versions/1.0")
+
+
+def _setup_gstreamer_env() -> None:
+    """gi/Gst import 전에 framework의 typelib·dylib·plugin 경로를 환경에 주입.
+
+    공식 framework가 번들한 PyGObject는 python3.9용이라 우리 3.12 venv에선
+    별도 설치한 pygobject(3.50.0 고정)를 쓰되, typelib/dylib은 framework
+    것을 가리켜야 한다. 셸 환경변수나 re-exec 없이 os.environ 설정만으로
+    macOS에서 로드됨(Phase 0/4에서 실측). 자세한 내막은 dev-log 14 참고.
+    """
+    fw = GSTREAMER_FRAMEWORK
+    os.environ.setdefault("GI_TYPELIB_PATH", str(fw / "lib" / "girepository-1.0"))
+    dyld = str(fw / "lib")
+    existing = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
+    if dyld not in existing.split(":"):
+        os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = dyld + (f":{existing}" if existing else "")
+    os.environ["GST_PLUGIN_PATH"] = str(PLUGIN_DIR)
+
+
+try:
+    _setup_gstreamer_env()
+    import gi
+
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+
+    Gst.init([])
+    GST_AVAILABLE = True
+    GST_IMPORT_ERROR = ""
+except Exception as gst_err:  # framework 미설치/연결 실패 등 — 재생 시 안내
+    Gst = None
+    GST_AVAILABLE = False
+    GST_IMPORT_ERROR = str(gst_err)
 
 # 문장 종결로 인정하는 문자 (이미 끝나있으면 마침표 중복 안 붙임)
 _TERMINATORS = ".!?…。！？"
 _INLINE_WHITESPACE = re.compile(r"[ \t]+")
+# AVSpeech는 "<...>"를 마크업 태그로 해석해 그 지점에서 발화를 끊는다(실측).
+# 예: "<기자>"가 중간에 있으면 거기서 재생이 잘림. 꺾쇠를 공백으로 중화하면
+# 안쪽 글자("기자")는 정상 발음되고 잘림도 사라진다. 공백·탭과 함께 취급.
+_DROP_FOR_SPEECH = " \t<>"
 
 
 # ---- TTS 엔진 레지스트리 ---------------------------------------------------
@@ -182,7 +219,9 @@ def preprocess_for_speech(text: str) -> str:
     """
     lines = []
     for raw in text.splitlines():
-        line = _INLINE_WHITESPACE.sub(" ", raw).strip()
+        # 꺾쇠(<>)를 공백으로 중화 후 공백/탭 정리 (AVSpeech 마크업 끊김 방지)
+        cleaned = "".join(" " if c in "<>" else c for c in raw)
+        line = _INLINE_WHITESPACE.sub(" ", cleaned).strip()
         if line:
             lines.append(line)
     if not lines:
@@ -195,6 +234,89 @@ def preprocess_for_speech(text: str) -> str:
             line = line + "."
         processed.append(line)
     return " ".join(processed)
+
+
+# 한국어 끝음절 잘림 방지 패딩 (재생/내보내기 공통). 자세한 이유는 _on_play 참고.
+TAIL_PADDING = " ,,"
+
+
+def build_spoken_text(text: str) -> tuple[str, list[int]]:
+    """preprocess_for_speech(text) + TAIL_PADDING 와 **동일한** 읽기 문자열을
+    만들되, 읽기 문자열의 각 글자가 원본 text의 몇 번째 코드포인트인지
+    매핑(offset_map)을 함께 반환한다. 삽입 글자(자동 마침표·줄 연결 공백·끝
+    패딩)는 -1.
+
+    인프로세스 재생에서 이 문자열을 합성기로 보내고, macttssink가 돌려주는
+    단어 범위(읽기 문자열 기준)를 offset_map으로 원본 위치에 되돌려
+    실시간 하이라이트에 쓴다.
+
+    범위/매핑은 코드포인트 기준. BMP(한국어·영어·CJK)는 UTF-16과 1:1이라
+    macttssink가 주는 UTF-16 범위와 그대로 맞는다. BMP 밖(이모지 등)은
+    수신 측(Phase 4)에서 UTF-16↔코드포인트 보정 필요 — 현재는 BMP 가정.
+    """
+    # 1) 줄 분리 + 각 줄의 원본 시작 오프셋 (\n, \r, \r\n 처리)
+    raw_lines: list[tuple[int, str]] = []
+    start = 0
+    i = 0
+    n = len(text)
+    while i <= n:
+        if i == n or text[i] in "\n\r":
+            raw_lines.append((start, text[start:i]))
+            if i < n and text[i : i + 2] == "\r\n":
+                i += 1
+            start = i + 1
+        i += 1
+
+    # 2) 각 줄: 연속 공백/탭 → 단일 공백, 양끝 strip. 글자별 원본 인덱스 추적.
+    cleaned: list[list[tuple[str, int]]] = []
+    for off, raw in raw_lines:
+        buf: list[tuple[str, int]] = []
+        prev_space = False
+        for j, ch in enumerate(raw):
+            if ch in _DROP_FOR_SPEECH:  # 공백·탭·꺾쇠(<>)는 공백으로 (하이라이트 -1)
+                if not prev_space:
+                    buf.append((" ", -1))
+                prev_space = True
+            else:
+                buf.append((ch, off + j))
+                prev_space = False
+        while buf and buf[0][0] == " ":
+            buf.pop(0)
+        while buf and buf[-1][0] == " ":
+            buf.pop()
+        if buf:
+            cleaned.append(buf)
+
+    if not cleaned:
+        return "", []
+
+    # 3) 마침표(비마지막) + 줄 연결 공백 + 끝 패딩
+    chars: list[str] = []
+    omap: list[int] = []
+    for idx, buf in enumerate(cleaned):
+        for ch, oi in buf:
+            chars.append(ch)
+            omap.append(oi)
+        if idx != len(cleaned) - 1:
+            if buf[-1][0] not in _TERMINATORS:
+                chars.append(".")
+                omap.append(-1)
+            chars.append(" ")
+            omap.append(-1)
+    for ch in TAIL_PADDING:
+        chars.append(ch)
+        omap.append(-1)
+
+    return "".join(chars), omap
+
+
+def map_spoken_range(omap: list[int], start: int, end: int) -> tuple[int, int] | None:
+    """읽기 문자열의 [start, end) 범위를 원본 코드포인트 [lo, hi) 범위로 매핑.
+    범위 안에 원본 글자가 하나도 없으면(삽입 글자뿐) None."""
+    origs = [omap[i] for i in range(start, min(end, len(omap))) if i >= 0 and omap[i] >= 0]
+    if not origs:
+        return None
+    return min(origs), max(origs) + 1
 
 
 class LabeledSlider(QWidget):
@@ -240,17 +362,142 @@ class LabeledSlider(QWidget):
         return self.slider.value()
 
 
+class GstPlayer(QObject):
+    """인프로세스 GStreamer 재생 컨트롤러 (PyGObject).
+
+    파이프라인(filesrc ! capsfilter ! macttssink)을 GUI 프로세스 안에서 직접
+    구동한다. 그래야 (a) macttssink가 버스에 올리는 단어 범위 메시지를
+    QTimer 폴링으로 받아 실시간 하이라이트에 쓰고, (b) 일시정지/재개/정지를
+    엘리먼트에 직접 보낼 수 있다 — gst-launch 서브프로세스로는 불가능. 자세한
+    설계 배경은 dev-log 14 참고.
+
+    버스는 GLib 메인루프 대신 QTimer로 폴링한다(Qt 이벤트 루프와 자연스럽게
+    통합). 메시지는 스트리밍/메인 스레드에서 post되지만 폴링·시그널 방출은
+    모두 GUI 스레드라 UI 접근이 안전하다.
+    """
+
+    wordSpoken = Signal(int, int)  # 읽기 문자열의 단어 범위 (start, end)
+    finished = Signal()
+    failed = Signal(str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._pipeline = None
+        self._sink = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(20)
+        self._timer.timeout.connect(self._poll_bus)
+
+    def is_active(self) -> bool:
+        return self._pipeline is not None
+
+    def play(
+        self,
+        text_path: str,
+        sink_element: str,
+        rate: float,
+        pitch: float,
+        volume: float,
+        voice: str | None,
+    ) -> None:
+        self.stop()
+        pipeline = Gst.Pipeline.new("annoyspeaker")
+        src = Gst.ElementFactory.make("filesrc", "src")
+        capsf = Gst.ElementFactory.make("capsfilter", "caps")
+        sink = Gst.ElementFactory.make(sink_element, "tts")
+        if not (pipeline and src and capsf and sink):
+            self.failed.emit(f"GStreamer 요소 생성 실패 ('{sink_element}' 플러그인 확인)")
+            return
+
+        src.set_property("location", text_path)
+        src.set_property("blocksize", 104857600)  # 100MB - 어떤 길이든 한 buffer로
+        capsf.set_property("caps", Gst.Caps.from_string("text/x-raw,format=utf8"))
+        sink.set_property("rate", rate)
+        sink.set_property("pitch", pitch)
+        sink.set_property("volume", volume)
+        if voice:
+            sink.set_property("voice", voice)
+
+        for el in (src, capsf, sink):
+            pipeline.add(el)
+        src.link(capsf)
+        capsf.link(sink)
+
+        self._pipeline = pipeline
+        self._sink = sink
+        pipeline.set_state(Gst.State.PLAYING)
+        self._timer.start()
+
+    def pause(self) -> None:
+        if self._sink is not None:
+            self._sink.emit("pause")
+
+    def resume(self) -> None:
+        if self._sink is not None:
+            self._sink.emit("resume")
+
+    def stop(self) -> None:
+        self._teardown()
+
+    def _teardown(self) -> None:
+        self._timer.stop()
+        if self._pipeline is not None:
+            # unlock()이 블록된 render()를 깨워 즉시 NULL로 내려간다 (데드락 없음).
+            self._pipeline.set_state(Gst.State.NULL)
+            self._pipeline = None
+            self._sink = None
+
+    def _poll_bus(self) -> None:
+        if self._pipeline is None:
+            return
+        bus = self._pipeline.get_bus()
+        types = Gst.MessageType.ELEMENT | Gst.MessageType.ERROR | Gst.MessageType.EOS
+        while True:
+            msg = bus.timed_pop_filtered(0, types)
+            if msg is None:
+                break
+            if msg.type == Gst.MessageType.ELEMENT:
+                s = msg.get_structure()
+                if s is None:
+                    continue
+                name = s.get_name()
+                if name == "annoyspeaker-word":
+                    self.wordSpoken.emit(s.get_value("start"), s.get_value("end"))
+                elif name == "annoyspeaker-done":
+                    self._teardown()
+                    self.finished.emit()
+                    return
+            elif msg.type == Gst.MessageType.EOS:
+                self._teardown()
+                self.finished.emit()
+                return
+            elif msg.type == Gst.MessageType.ERROR:
+                err, _dbg = msg.parse_error()
+                self._teardown()
+                self.failed.emit(str(err))
+                return
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("AnnoySpeaker")
         self.resize(760, 560)
 
-        self._process: QProcess | None = None
         self._export_process: QProcess | None = None
         self._tmp_text_path: str | None = None
         self._current_engine: Engine = ENGINES[0]
         self._has_voices: bool = False
+        self._omap: list[int] = []  # 읽기 문자열 → 원본 위치 매핑 (현재 재생)
+        self._hl_start: int | None = None  # 누적 하이라이트 시작 위치
+        self._playback_state = "idle"  # idle / playing / paused
+
+        # 인프로세스 재생 컨트롤러 (PyGObject). framework 미연결이면 None.
+        self._player = GstPlayer(self) if GST_AVAILABLE else None
+        if self._player is not None:
+            self._player.wordSpoken.connect(self._on_word)
+            self._player.finished.connect(self._on_play_finished)
+            self._player.failed.connect(self._on_play_failed)
 
         self._build_toolbar()
         self._build_central()
@@ -275,9 +522,20 @@ class MainWindow(QMainWindow):
             self,
         )
         self.play_action.setShortcut(QKeySequence("Ctrl+Return"))
-        self.play_action.setToolTip("선택된 텍스트를 음성으로 재생 (Cmd+Enter)")
+        self.play_action.setToolTip("재생: 처음부터 / 일시정지 중이면 이어재생 (Cmd+Enter)")
         self.play_action.triggered.connect(self._on_play)
         toolbar.addAction(self.play_action)
+
+        # 일시정지 (재생 ▶ 와 정지 ■ 사이). 일시정지 전용 — 아이콘 안 바뀌고,
+        # 일시정지하면 비활성화된다(재개는 ▶ 재생 버튼이 담당).
+        self.pause_action = QAction(
+            style.standardIcon(QStyle.StandardPixmap.SP_MediaPause), "일시정지", self
+        )
+        self.pause_action.setShortcut(QKeySequence("Ctrl+P"))
+        self.pause_action.setToolTip("일시정지 (Cmd+P)")
+        self.pause_action.triggered.connect(self._do_pause)
+        self.pause_action.setEnabled(False)
+        toolbar.addAction(self.pause_action)
 
         self.stop_action = QAction(
             style.standardIcon(QStyle.StandardPixmap.SP_MediaStop),
@@ -370,7 +628,7 @@ class MainWindow(QMainWindow):
 
         self.text_edit = QPlainTextEdit()
         self.text_edit.setPlaceholderText("여기에 읽을 텍스트를 붙여넣으세요…")
-        self.text_edit.textChanged.connect(self._update_char_count)
+        self.text_edit.textChanged.connect(self._on_text_changed)
         layout.addWidget(self.text_edit, stretch=1)
 
         self.setCentralWidget(central)
@@ -394,6 +652,15 @@ class MainWindow(QMainWindow):
     def _update_char_count(self) -> None:
         n = len(self.text_edit.toPlainText())
         self.char_label.setText(f"글자: {n}")
+
+    def _on_text_changed(self) -> None:
+        self._update_char_count()
+        # 재생/일시정지 중 사용자가 텍스트를 편집하면 문서 위치가 밀려 현재 재생의
+        # 위치 매핑(omap)이 어긋나 하이라이트 싱크가 깨지고, 편집한 글자는 지금
+        # 재생엔 포함도 안 된다. 그래서 편집은 "정지"와 동일하게 처리한다 —
+        # 멈추고 하이라이트를 지운 뒤, 새 내용은 ▶로 처음부터 듣게 한다.
+        if self._playback_state in ("playing", "paused"):
+            self._on_stop()
 
     def _on_engine_changed(self, index: int) -> None:
         """콤보박스에서 엔진을 바꾸면 현재 엔진을 교체하고 UI를 갱신.
@@ -493,85 +760,85 @@ class MainWindow(QMainWindow):
         return rate, pitch, volume
 
     def _on_play(self) -> None:
-        if self._process is not None:
-            return  # 이미 재생 중
+        """재생 버튼: 일시정지 중이면 이어재생, 아니면 처음부터 재생."""
+        if self._playback_state == "paused":
+            self._do_resume()
+        else:
+            self._start_playback()
 
-        text = preprocess_for_speech(self.text_edit.toPlainText())
-        if not text:
+    def _start_playback(self) -> None:
+        if self._player is None:
+            self._fail(f"GStreamer를 불러올 수 없습니다 (framework 확인). {GST_IMPORT_ERROR}")
+            return
+        if self._player.is_active():
+            self._player.stop()  # 만약을 위한 정리
+
+        # 읽기 문자열 + 원본 위치 매핑. spoken은 preprocess+패딩과 바이트 동일이라
+        # 오디오는 그대로고, omap으로 단어 범위를 원본에 되돌려 하이라이트한다.
+        spoken, omap = build_spoken_text(self.text_edit.toPlainText())
+        if not spoken:
             self.status_label.setText("입력된 텍스트가 없습니다.")
             return
-
-        # AVSpeechSynthesizer가 한국어 종결 음절(받침 있는 글자)을
-        # trail off로 잘라먹는 문제 안전 패딩:
-        # - trailing 공백만은 어딘가에서 trim되어 효과 없음
-        # - 쉼표만 붙이면 받침이 쉼표에 묻혀버림
-        # → 공백 1칸 + 쉼표 2개 조합: 공백이 음절 경계를 명확히 하고,
-        #   쉼표가 짧은 휴식을 만들어 fade out이 일어나기 전에
-        #   마지막 음절까지 다 발음됨.
-        text = text + " ,,"
-
         if not PLUGIN_DIR.exists():
             self._fail(f"플러그인 빌드 폴더를 찾을 수 없음: {PLUGIN_DIR}")
             return
-        if not Path(GST_LAUNCH).exists():
-            self._fail(f"gst-launch-1.0이 없음: {GST_LAUNCH}")
-            return
 
-        # 긴 텍스트도 한 buffer로 처리되도록 stdin 파이프 대신 임시 파일 + filesrc 사용.
-        # (stdin은 macOS pipe buffer(~16~64KB) + fdsrc 기본 청크(4KB)로 잘려 여러 utterance가
-        # 되면서 청크 경계 처리에서 문제가 생김. filesrc + 큰 blocksize면 전체를 한 번에 읽음.)
+        # 긴 텍스트도 한 buffer로 처리되도록 임시 파일 + filesrc 사용.
         try:
             tmp_fd, self._tmp_text_path = tempfile.mkstemp(suffix=".txt", prefix="kb-tts-")
             with os.fdopen(tmp_fd, "wb") as f:
-                f.write(text.encode("utf-8"))
+                f.write(spoken.encode("utf-8"))
         except OSError as e:
             self._fail(f"임시 파일 생성 실패: {e}")
             return
 
-        env = QProcessEnvironment.systemEnvironment()
-        env.insert("GST_PLUGIN_PATH", str(PLUGIN_DIR))
-
-        proc = QProcess(self)
-        proc.setProcessEnvironment(env)
-        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        proc.finished.connect(self._on_finished)
-        proc.errorOccurred.connect(self._on_error)
-
+        self._omap = omap
+        self._clear_highlight()
         rate, pitch, volume = self._slider_values()
-        args = [
-            "--quiet",
-            "filesrc",
-            f"location={self._tmp_text_path}",
-            "blocksize=104857600",  # 100MB - 어떤 길이든 한 buffer로
-            "!",
-            "text/x-raw,format=utf8",
-            "!",
+        self._player.play(
+            self._tmp_text_path,
             self._current_engine.sink_element,
-            f"rate={rate:.2f}",
-            f"pitch={pitch:.2f}",
-            f"volume={volume:.2f}",
-        ]
-        voice = self._selected_voice()
-        if voice:
-            args.append(f"voice={voice}")
+            rate,
+            pitch,
+            volume,
+            self._selected_voice(),
+        )
 
-        self._process = proc
-        proc.start(GST_LAUNCH, args)
-        if not proc.waitForStarted(3000):
-            self._fail("gst-launch-1.0 시작 실패")
-            self._process = None
-            self._cleanup_tmp_text()
-            return
-
-        self.play_action.setEnabled(False)
-        self.stop_action.setEnabled(True)
-        self.engine_combo.setEnabled(False)
-        self.voice_combo.setEnabled(False)
+        self._apply_state("playing")
         ui_x = self.rate_slider.value() / 10.0
         self.status_label.setText(
             f"재생 중… (속도 {ui_x:.1f}x · rate {rate:.2f}, "
             f"음높이 {int(pitch * 100)}%, 볼륨 {int(volume * 100)}%)"
         )
+
+    # ---- 하이라이트 ---------------------------------------------------------
+
+    def _on_word(self, start: int, end: int) -> None:
+        """macttssink가 보낸 단어 범위(읽기 문자열 기준)를 원본 위치로 되돌려
+        누적 하이라이트. (범위는 UTF-16 코드유닛; BMP=한/영은 코드포인트와 1:1.)"""
+        mapped = map_spoken_range(self._omap, start, end)
+        if mapped is None:
+            return
+        lo, hi = mapped
+        if self._hl_start is None:
+            self._hl_start = lo
+        self._apply_highlight(self._hl_start, hi)
+
+    def _apply_highlight(self, lo: int, hi: int) -> None:
+        sel = QTextEdit.ExtraSelection()
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor("#2d6cdf"))
+        fmt.setForeground(QColor("white"))
+        cursor = QTextCursor(self.text_edit.document())
+        cursor.setPosition(lo)
+        cursor.setPosition(hi, QTextCursor.MoveMode.KeepAnchor)
+        sel.cursor = cursor
+        sel.format = fmt
+        self.text_edit.setExtraSelections([sel])
+
+    def _clear_highlight(self) -> None:
+        self._hl_start = None
+        self.text_edit.setExtraSelections([])
 
     def _on_export(self) -> None:
         if self._export_process is not None:
@@ -658,12 +925,39 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"저장됨: {path}")
 
     def _on_stop(self) -> None:
-        if self._process is None:
-            return
-        self._process.terminate()
-        if not self._process.waitForFinished(1500):
-            self._process.kill()
-        # finished 시그널에서 상태 정리됨
+        if self._player is not None:
+            self._player.stop()  # unlock()이 즉시 NULL로 내려 매달림 없음
+        self._cleanup_tmp_text()
+        self._clear_highlight()
+        self._apply_state("idle")
+        self.status_label.setText("정지됨")
+
+    def _on_play_finished(self) -> None:
+        # 자연 완료: 하이라이트는 남겨둠(완독 표시), 다음 재생 시 초기화.
+        self._cleanup_tmp_text()
+        self._apply_state("idle")
+        self.status_label.setText("준비")
+
+    def _on_play_failed(self, message: str) -> None:
+        self._cleanup_tmp_text()
+        self._clear_highlight()
+        self._fail(message)
+
+    # ---- 일시정지 / 재개 ----------------------------------------------------
+
+    def _do_pause(self) -> None:
+        """일시정지 버튼. 일시정지하면 이 버튼은 비활성화되고, 재개는 ▶가 맡는다."""
+        if self._player is not None:
+            self._player.pause()
+        self._apply_state("paused")
+        self.status_label.setText("일시정지됨")
+
+    def _do_resume(self) -> None:
+        """▶가 paused 상태에서 호출 → 멈춘 위치부터 이어재생."""
+        if self._player is not None:
+            self._player.resume()
+        self._apply_state("playing")
+        self.status_label.setText("재생 중…")
 
     def _cleanup_tmp_text(self) -> None:
         if self._tmp_text_path:
@@ -673,29 +967,29 @@ class MainWindow(QMainWindow):
                 pass
             self._tmp_text_path = None
 
-    def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
-        self._process = None
-        self._cleanup_tmp_text()
-        self.play_action.setEnabled(True)
-        self.stop_action.setEnabled(False)
-        self.engine_combo.setEnabled(True)
-        self.voice_combo.setEnabled(self._has_voices)
-        if exit_status == QProcess.ExitStatus.CrashExit:
-            self.status_label.setText("정지됨")
-        elif exit_code != 0:
-            self.status_label.setText(f"실패 (exit {exit_code})")
-        else:
-            self.status_label.setText("준비")
+    def _apply_state(self, state: str) -> None:
+        """재생 상태(idle/playing/paused)에 맞춰 버튼·콤보박스 활성화를 설정.
+
+        - idle:    ▶ on,  ‖ off, ■ off  (처음부터 재생 가능)
+        - playing: ▶ off, ‖ on,  ■ on
+        - paused:  ▶ on,  ‖ off, ■ on   (▶는 이어재생, ‖는 비활성화)
+        """
+        self._playback_state = state
+        playing = state == "playing"
+        active = state in ("playing", "paused")
+        self.play_action.setEnabled(not playing)
+        self.pause_action.setEnabled(playing)
+        self.stop_action.setEnabled(active)
+        self.engine_combo.setEnabled(not active)
+        self.voice_combo.setEnabled(self._has_voices and not active)
 
     def _on_error(self, err: QProcess.ProcessError) -> None:
+        # 내보내기(QProcess) 에러 경로
         self._fail(f"프로세스 에러: {err}")
 
     def _fail(self, message: str) -> None:
+        self._apply_state("idle")
         self.status_label.setText(message)
-        self.play_action.setEnabled(True)
-        self.stop_action.setEnabled(False)
-        self.engine_combo.setEnabled(True)
-        self.voice_combo.setEnabled(self._has_voices)
 
 
 def main() -> int:

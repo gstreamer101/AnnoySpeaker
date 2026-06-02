@@ -1,2 +1,8 @@
 PySide6>=6.8
 pyinstaller>=6.0
+# 인프로세스 GStreamer 재생용 (일시정지·단어 하이라이트). 최신 PyGObject는
+# girepository-2.0을 요구하지만 공식 GStreamer.framework엔 구식
+# gobject-introspection-1.0(1.84)만 있어 3.50.0으로 고정해야 빌드된다.
+# 빌드 시 framework의 pkgconfig 필요 — setup-dev.sh가 PKG_CONFIG_LIBDIR 설정.
+pygobject==3.50.0
+pycairo

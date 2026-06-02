@@ -267,7 +267,11 @@ if (( DO_GUI )); then
     # shellcheck disable=SC1091
     source .venv/bin/activate
     pip install --quiet --upgrade pip
-    pip install --quiet -r requirements.txt
+    # PyGObject(3.50.0)는 공식 GStreamer.framework의 pkgconfig로 빌드해야 함
+    # (girepository/gobject-introspection). plugin 빌드와 동일한 우회.
+    PKG_CONFIG_PATH="" \
+    PKG_CONFIG_LIBDIR="/Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig" \
+      pip install --quiet -r requirements.txt
   )
 
   ok "의존성 설치 완료: $(grep -v '^\s*#' requirements.txt | tr '\n' ' ')"
@@ -381,9 +385,8 @@ echo "    GST_PLUGIN_PATH=\"\$(pwd)/plugin/builddir\" \\"
 echo "    gst-launch-1.0 --quiet fdsrc ! 'text/x-raw,format=utf8' ! macttssink"
 echo
 if (( DO_GUI )); then
-  echo "  ${C_BOLD}# GUI 실행 (venv 활성화 + Python)${C_RESET}"
-  echo "  cd gui && source .venv/bin/activate && \\"
-  echo "    GST_PLUGIN_PATH=\"\$(pwd)/../plugin/builddir\" python main.py"
+  echo "  ${C_BOLD}# GUI 실행 (main.py가 GStreamer 경로를 자동 설정)${C_RESET}"
+  echo "  cd gui && source .venv/bin/activate && python main.py"
   echo
 fi
 if (( BUILD_APP )); then
