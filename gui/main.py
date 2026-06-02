@@ -84,11 +84,30 @@ def _setup_gstreamer_env() -> None:
     existing = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
     if dyld not in existing.split(":"):
         os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = dyld + (f":{existing}" if existing else "")
-    os.environ["GST_PLUGIN_PATH"] = str(PLUGIN_DIR)
+    # 플러그인 경로: 우리 macttssink(PLUGIN_DIR) + 시스템 framework의 코어
+    # 플러그인(filesrc, capsfilter 등). .app에선 GST_PLUGIN_PATH를 명시하면
+    # 기본 시스템 경로 스캔이 빠질 수 있어 framework 경로를 함께 지정한다.
+    os.environ["GST_PLUGIN_PATH"] = os.pathsep.join(
+        [str(PLUGIN_DIR), str(fw / "lib" / "gstreamer-1.0")]
+    )
+    scanner = fw / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner"
+    if scanner.exists():
+        os.environ["GST_PLUGIN_SCANNER"] = str(scanner)
 
+
+_setup_gstreamer_env()
+
+# .app(frozen) 한정: macOS dyld는 DYLD_* 환경변수를 "프로세스 시작 시점"에만
+# 읽는다. 번들 gi(_gi.so)의 @rpath 의존성(libgirepository 등)을 시스템
+# framework로 폴백시키려면 그 환경이 시작 때 있어야 한다. os.environ 설정만으론
+# 이미 시작된 dyld에 안 먹히므로, 환경을 세팅한 뒤 한 번 재실행(execv)해 새
+# 프로세스가 시작 시점에 이 환경을 갖게 한다. (dev 모드는 framework가 기본
+# 경로라 불필요.)
+if _is_frozen_bundle() and os.environ.get("ANNOYSPEAKER_REEXEC") != "1":
+    os.environ["ANNOYSPEAKER_REEXEC"] = "1"
+    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 
 try:
-    _setup_gstreamer_env()
     # 동적 import: PyInstaller의 gi 자동 훅이 우리 pygobject(3.50)+공식
     # framework 조합과 비호환이라 .app 빌드 시 크래시(Gst.init(None) 등)한다.
     # 모듈명을 변수로 줘서 정적 분석에 안 걸리게 우회하고, gi는 spec에서 수동
@@ -1013,8 +1032,35 @@ def _selftest() -> int:
     if el is None:
         print(f"SELFTEST FAIL: '{ENGINES[0].sink_element}' 요소 생성 실패 (플러그인 경로 확인)")
         return 1
-    rate = el.get_property("rate")
-    print(f"SELFTEST OK: {ENGINES[0].sink_element} 인스턴스화 (rate={rate})")
+    print(f"SELFTEST: {ENGINES[0].sink_element} 인스턴스화 OK (rate={el.get_property('rate')})")
+
+    # 실제 재생까지 — 요소 생성만으론 "두 glib" 같은 런타임 충돌(무음)을 못 잡는다.
+    # 짧은 텍스트를 끝까지 합성해 단어 이벤트/완료가 오는지 본다.
+    app = QApplication([])
+    player = GstPlayer()
+    state = {"words": 0, "done": False, "fail": None}
+    player.wordSpoken.connect(lambda s, e: state.__setitem__("words", state["words"] + 1))
+    player.finished.connect(lambda: (state.__setitem__("done", True), app.quit()))
+    player.failed.connect(lambda m: (state.__setitem__("fail", m), app.quit()))
+
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="selftest-")
+    with os.fdopen(fd, "wb") as f:
+        f.write("자가진단 문장 하나 둘 셋".encode("utf-8"))
+    player.play(path, ENGINES[0].sink_element, 0.5, 1.0, 1.0, None)
+    QTimer.singleShot(12000, app.quit)
+    app.exec()
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+    if state["fail"]:
+        print(f"SELFTEST SPEAK FAIL: {state['fail']}")
+        return 1
+    if not state["done"] or state["words"] == 0:
+        print(f"SELFTEST SPEAK FAIL: 재생 미완료 (단어 {state['words']}개, done={state['done']})")
+        return 1
+    print(f"SELFTEST SPEAK OK: 단어 {state['words']}개 수신 + 완료 (소리 정상일 가능성 높음)")
     return 0
 
 
