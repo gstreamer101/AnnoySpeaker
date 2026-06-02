@@ -36,6 +36,31 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# 시스템 GStreamer.framework를 런타임에 쓴다(dev 모드와 동일). PyInstaller가
+# 자동 수집한 glib/gstreamer 계열 dylib(framework본 + homebrew본 양쪽)을 .app
+# 에서 모두 제거한다 — 번들본과 시스템 framework본이 함께 로드되면 glib 타입
+# 시스템이 충돌해 재생이 조용히 망가진다(요소 생성은 되지만 소리 안 남). main.py
+# 의 re-exec가 시작 시점 DYLD_FALLBACK으로 이들을 시스템 framework에서 찾게 한다.
+# (libffi/libintl 등 다른 소비자가 있을 수 있는 라이브러리는 건드리지 않음.)
+import os as _os
+
+_DROP_LIB_PREFIXES = (
+    'libglib-2.0', 'libgobject-2.0', 'libgio-2.0', 'libgmodule-2.0',
+    'libgthread-2.0', 'libgirepository-1.0', 'libgst',
+)
+
+
+def _keep_binary(b):
+    src = b[1]
+    if 'GStreamer.framework' in src:
+        return False
+    base = _os.path.basename(src)
+    return not any(base.startswith(p) for p in _DROP_LIB_PREFIXES)
+
+
+a.binaries = [b for b in a.binaries if _keep_binary(b)]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
