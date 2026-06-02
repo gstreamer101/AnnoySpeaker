@@ -89,10 +89,17 @@ def _setup_gstreamer_env() -> None:
 
 try:
     _setup_gstreamer_env()
-    import gi
+    # 동적 import: PyInstaller의 gi 자동 훅이 우리 pygobject(3.50)+공식
+    # framework 조합과 비호환이라 .app 빌드 시 크래시(Gst.init(None) 등)한다.
+    # 모듈명을 변수로 줘서 정적 분석에 안 걸리게 우회하고, gi는 spec에서 수동
+    # 수집한다. 런타임 typelib/dylib은 _setup_gstreamer_env()가 가리키는 시스템
+    # framework에서 로드된다.
+    import importlib
 
+    _gi_mod = "gi"
+    gi = importlib.import_module(_gi_mod)
     gi.require_version("Gst", "1.0")
-    from gi.repository import Gst
+    Gst = importlib.import_module(_gi_mod + ".repository.Gst")
 
     Gst.init([])
     GST_AVAILABLE = True
@@ -992,7 +999,28 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
 
 
+def _selftest() -> int:
+    """GStreamer 연결 자가진단. `AnnoySpeaker --selftest`로 호출.
+
+    번들(.app)에서도 gi가 로드되고 macttssink 요소가 만들어지는지 확인 —
+    "두 개의 glib" 같은 패키징 문제를 조기에 잡는다. 정상 0, 실패 1.
+    """
+    if not GST_AVAILABLE:
+        print(f"SELFTEST FAIL: GStreamer 사용 불가 — {GST_IMPORT_ERROR}")
+        return 1
+    print(f"SELFTEST: GStreamer {Gst.version_string()}")
+    el = Gst.ElementFactory.make(ENGINES[0].sink_element, "t")
+    if el is None:
+        print(f"SELFTEST FAIL: '{ENGINES[0].sink_element}' 요소 생성 실패 (플러그인 경로 확인)")
+        return 1
+    rate = el.get_property("rate")
+    print(f"SELFTEST OK: {ENGINES[0].sink_element} 인스턴스화 (rate={rate})")
+    return 0
+
+
 def main() -> int:
+    if "--selftest" in sys.argv:
+        return _selftest()
     app = QApplication(sys.argv)
     app.setApplicationName("AnnoySpeaker")
     window = MainWindow()

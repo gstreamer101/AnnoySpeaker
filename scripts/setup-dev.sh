@@ -322,7 +322,11 @@ if (( BUILD_APP )); then
       exit 1
     fi
     note "PyInstaller 실행 중 (.app에 plugin .dylib과 export 도구를 함께 묶습니다)..."
-    pyinstaller --noconfirm --log-level=WARN AnnoySpeaker.spec
+    # PyGObject(gi) 수집 시 PyInstaller 훅이 framework의 typelib(.typelib)과
+    # GIR(.gir)을 찾아야 한다. 시스템 GStreamer.framework 경로를 알려준다.
+    FW=/Library/Frameworks/GStreamer.framework/Versions/1.0
+    XDG_DATA_DIRS="$FW/share" GI_TYPELIB_PATH="$FW/lib/girepository-1.0" \
+      pyinstaller --noconfirm --log-level=WARN AnnoySpeaker.spec
   )
 
   APP_PATH="$PROJECT_ROOT/gui/dist/AnnoySpeaker.app"
