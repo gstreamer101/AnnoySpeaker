@@ -86,10 +86,12 @@ jobs:
           test -x tools/kb-tts-export/kb-tts-export
           echo "✅ plugin dylib · export tool 생성됨"
 
-      # 1차 CI에서 skip되던 플러그인/도구 런타임 테스트가 여기서 실제로 돈다
-      # (gst-inspect 속성, kb-tts-export m4a 변환 — 오프라인 합성이라 동작).
-      - name: Run tests (incl. plugin/tool CLI tests)
+      # 1차 CI에서 skip되던 네이티브 테스트(gst-inspect 속성, --list-voices)를
+      # 여기서 실제로 돌린다. 단 라이브 AVSpeech 합성이 필요한 테스트(avspeech
+      # 마커: m4a 변환)는 헤드리스 러너에서 합성 출력이 안 나와 멈추므로 제외한다.
+      # (그 테스트들은 로컬/실기기 `pytest`에서 검증된다.)
+      - name: Run tests (native, excluding live-synthesis)
         run: |
           set -euo pipefail
           python -m pip install --quiet pytest
-          python -m pytest
+          python -m pytest -m "not avspeech"

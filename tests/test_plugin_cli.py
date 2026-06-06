@@ -68,6 +68,7 @@ def test_list_voices_format():
     assert all(len(r.split("\t")) >= 4 for r in rows)
 
 
+@pytest.mark.avspeech
 @requires_export_tool
 def test_export_short_text_creates_m4a(tmp_path, short_text):
     """(1) 짧은 텍스트가 유효한 m4a로 잘 생성되는지."""
@@ -84,6 +85,7 @@ def test_export_short_text_creates_m4a(tmp_path, short_text):
     assert "Encoding" in res.stderr and "Saved:" in res.stderr
 
 
+@pytest.mark.avspeech
 @requires_export_tool
 def test_export_large_text_creates_m4a(tmp_path, large_text):
     """(2) 1만 자 이상 대용량 텍스트도 유효한 m4a로 잘 생성되는지."""
@@ -104,6 +106,7 @@ def test_export_large_text_creates_m4a(tmp_path, large_text):
     assert m and int(m.group(1)) > 1, f"청크 분할이 안 됨:\n{res.stderr}"
 
 
+@pytest.mark.avspeech
 @requires_export_tool
 def test_export_long_text_per_chunk_progress(tmp_path, long_text):
     """긴 텍스트는 여러 청크로 나뉘고, 청크마다 진행률이 출력된다(회귀 #54)."""
