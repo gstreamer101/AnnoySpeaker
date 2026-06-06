@@ -263,8 +263,11 @@ def preprocess_for_speech(text: str) -> str:
     return " ".join(processed)
 
 
-# 한국어 끝음절 잘림 방지 패딩 (재생/내보내기 공통). 자세한 이유는 _on_play 참고.
-TAIL_PADDING = " ,,"
+# 한국어 끝음절 잘림 방지용 꼬리 패딩 (재생/내보내기 공통).
+# 끝음절(받침) 잘림은 plugin의 postUtteranceDelay(마지막 청크 포함)가 막아주므로
+# 발화되는 문자는 붙이지 않는다. 예전엔 " ,,"(쉼표)를 썼으나 프리미엄 음성
+# (예: Yuna Premium)이 쉼표를 "쉼표"라고 읽어버려 무음 공백으로 교체.
+TAIL_PADDING = "  "
 
 
 def build_spoken_text(text: str) -> tuple[str, list[int]]:
@@ -888,8 +891,8 @@ class MainWindow(QMainWindow):
         if not text:
             self.status_label.setText("입력된 텍스트가 없습니다.")
             return
-        # 라이브 재생과 동일한 한국어 안전 패딩 적용
-        text = text + " ,,"
+        # 라이브 재생과 동일한 한국어 안전 패딩 적용 (무음 공백)
+        text = text + TAIL_PADDING
 
         # 파일 경로 받기
         path, _ = QFileDialog.getSaveFileName(
