@@ -7,11 +7,31 @@
 
 #include "gstmacttssink_macos.h"
 
+/* 일시정지/재개 설계 노트
+ * --------------------------------------------------------------------------
+ * AVSpeechSynthesizer의 pauseSpeakingAtBoundary:/continueSpeaking 은 반복
+ * 사이클에서 신뢰할 수 없다(실측·알려진 macOS 결함). 빠른 일시정지/재개를
+ * 누적하면 continueSpeaking 이 "한 단어만 말하고 스스로 다시 멈추는"(콜백도
+ * 안 오는) 상태로 빠져, 동기 대기하는 render()가 영영 안 깨지는 데드락이
+ * 생긴다. 그래서 합성기의 pause/continue 를 아예 쓰지 않는다.
+ *
+ * 대신 신뢰성 있는 stopSpeakingAtBoundary 만으로 구현한다:
+ *   - 일시정지 = 현재 발화를 stop + 마지막으로 말한 단어 위치(resumeOffset)를 기록
+ *   - 재개     = 그 청크를 resumeOffset 부터 다시 speak
+ * willSpeakRange 로 단어 위치를 추적하므로 마지막 단어부터 자연스럽게 잇는다.
+ * continueSpeaking 을 한 번도 거치지 않으므로 사이클이 쌓여도 데드락이 없다.
+ */
+
 @interface KbTtsDelegate : NSObject <AVSpeechSynthesizerDelegate>
 @property (nonatomic, strong) NSCondition *cond;
-@property (nonatomic, assign) BOOL done;
-@property (nonatomic, assign) BOOL cancelled;      /* stop 시 청크 루프 중단 */
-@property (nonatomic, assign) NSUInteger chunkBase; /* 현재 청크의 전체 문자열 내 시작(UTF-16) */
+@property (nonatomic, assign) BOOL done;        /* 현재 발화 종료(finish/cancel) */
+@property (nonatomic, assign) BOOL cancelled;   /* stop — 청크 루프 전체 중단 */
+@property (nonatomic, assign) BOOL paused;       /* 일시정지 — 재개까지 보류 */
+@property (nonatomic, assign) BOOL interrupted;  /* 일시정지로 현재 발화가 끊김 → 같은 청크 재발화 */
+@property (nonatomic, assign) NSUInteger resumeOffset;    /* 현재 청크 내 재개 오프셋(UTF-16) */
+@property (nonatomic, assign) NSUInteger subBase;         /* 현재 발화가 청크 내에서 시작하는 오프셋 */
+@property (nonatomic, assign) NSUInteger lastWordInChunk; /* 마지막으로 말한 단어의 청크 내 시작 */
+@property (nonatomic, assign) NSUInteger chunkBase;       /* 현재 발화 시작의 전체 문자열 내 위치 */
 @property (nonatomic, assign) mac_tts_word_cb wordCb;
 @property (nonatomic, assign) void *wordCbUser;
 @end
@@ -47,6 +67,9 @@
 {
   (void) synthesizer;
   (void) utterance;
+  /* 일시정지(stop)·정지 양쪽에서 오는 콜백. 대기 중인 render()를 깨운다.
+   * 일시정지였는지(=같은 청크 재발화) 정지였는지는 render()가 interrupted/
+   * cancelled 플래그로 구분한다. */
   [self signalDone];
 }
 
@@ -56,9 +79,12 @@
 {
   (void) synthesizer;
   (void) utterance;
+  /* 이번 발화는 현재 청크의 subBase 위치부터 시작하는 부분 문자열이므로
+   * 청크 내 절대 오프셋 = subBase + characterRange.location. 일시정지 시
+   * 이 위치를 재개 지점으로 쓴다. */
+  _lastWordInChunk = _subBase + characterRange.location;
   if (_wordCb) {
-    /* 청크(문장) 단위로 말하므로 범위는 청크 기준 → 전체 문자열 기준으로
-     * 보정(chunkBase). 그래야 GUI가 원본 위치로 되돌릴 수 있다. */
+    /* 전체 문자열 기준 = chunkBase(= cr.location + subBase) + 발화 내 위치 */
     _wordCb (_wordCbUser, (unsigned int) (_chunkBase + characterRange.location),
         (unsigned int) characterRange.length);
   }
@@ -94,12 +120,9 @@ mac_tts_shutdown (mac_tts_ctx *ctx)
   }
   @autoreleasepool {
     KbTtsHandle *handle = (__bridge_transfer KbTtsHandle *) ctx;
+    /* 합성기를 일시정지 상태로 두지 않으므로(우리는 stop+재발화만 씀) 단순
+     * 정지로 충분하다. */
     if (handle.synth.isSpeaking) {
-      /* 일시정지 상태에서 stop은 콜백(didCancel)이 안 오는 알려진 quirk가
-       * 있어, 먼저 continueSpeaking으로 재개한 뒤 즉시 정지한다. */
-      if (handle.synth.isPaused) {
-        [handle.synth continueSpeaking];
-      }
       [handle.synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
     }
     handle.synth.delegate = nil;
@@ -116,8 +139,24 @@ mac_tts_pause (mac_tts_ctx *ctx)
   }
   @autoreleasepool {
     KbTtsHandle *handle = (__bridge KbTtsHandle *) ctx;
-    if (handle.synth.isSpeaking && !handle.synth.isPaused) {
-      [handle.synth pauseSpeakingAtBoundary:AVSpeechBoundaryWord];
+    KbTtsDelegate *del = handle.delegate;
+    BOOL speaking = handle.synth.isSpeaking;
+    [del.cond lock];
+    if (del.cancelled) {
+      [del.cond unlock];
+      return;
+    }
+    del.paused = YES;
+    if (speaking) {
+      /* 현재 발화를 끊고, 마지막으로 말한 단어를 재개 지점으로 기록 →
+       * 재개 시 그 단어부터 같은 청크를 다시 발화한다. */
+      del.resumeOffset = del.lastWordInChunk;
+      del.interrupted = YES;
+    }
+    [del.cond unlock];
+    if (speaking) {
+      /* didCancel → signalDone 으로 render()의 done 대기가 풀린다. */
+      [handle.synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
     }
   }
 }
@@ -130,9 +169,11 @@ mac_tts_resume (mac_tts_ctx *ctx)
   }
   @autoreleasepool {
     KbTtsHandle *handle = (__bridge KbTtsHandle *) ctx;
-    if (handle.synth.isPaused) {
-      [handle.synth continueSpeaking];
-    }
+    KbTtsDelegate *del = handle.delegate;
+    [del.cond lock];
+    del.paused = NO;
+    [del.cond signal];  /* render()의 일시정지 대기를 깨워 같은 청크를 이어 발화 */
+    [del.cond unlock];
   }
 }
 
@@ -144,22 +185,19 @@ mac_tts_cancel (mac_tts_ctx *ctx)
   }
   @autoreleasepool {
     KbTtsHandle *handle = (__bridge KbTtsHandle *) ctx;
+    KbTtsDelegate *del = handle.delegate;
+    /* 정지: 청크 루프를 중단하고 모든 대기(done/paused)를 직접 깨운다.
+     * AVSpeech 콜백에 의존하지 않아야 데드락이 없다(콜백은 메인 스레드로
+     * 오는데 정지가 메인 스레드를 블록할 수 있음). */
+    [del.cond lock];
+    del.cancelled = YES;
+    del.paused = NO;
+    del.done = YES;
+    [del.cond signal];
+    [del.cond unlock];
     if (handle.synth.isSpeaking) {
-      /* 일시정지 상태면 stop 콜백이 안 오는 quirk 대비 먼저 재개 */
-      if (handle.synth.isPaused) {
-        [handle.synth continueSpeaking];
-      }
       [handle.synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
     }
-    /* 중요: AVSpeech의 didCancel 콜백은 메인 스레드로 전달되는데, 정지(state
-     * 변경)는 메인 스레드를 블록한다 → 콜백이 안 와서 render()의 cond 대기가
-     * 영영 안 깨지는 데드락. 그래서 콜백에 의존하지 않고 대기 중인 render()를
-     * 여기서 직접 깨운다. (뒤늦게 didCancel이 와도 done은 이미 YES라 무해.) */
-    [handle.delegate.cond lock];
-    handle.delegate.cancelled = YES;  /* 청크 루프도 중단 */
-    handle.delegate.done = YES;
-    [handle.delegate.cond signal];
-    [handle.delegate.cond unlock];
   }
 }
 
@@ -221,6 +259,7 @@ mac_tts_speak (mac_tts_ctx *ctx, const char *utf8_text,
   }
   @autoreleasepool {
     KbTtsHandle *handle = (__bridge KbTtsHandle *) ctx;
+    KbTtsDelegate *del = handle.delegate;
     NSString *text = [NSString stringWithUTF8String:utf8_text];
     if (!text || text.length == 0) {
       return -1;
@@ -239,27 +278,52 @@ mac_tts_speak (mac_tts_ctx *ctx, const char *utf8_text,
       }
     }
 
-    handle.delegate.wordCb = word_cb;
-    handle.delegate.wordCbUser = word_cb_user;
-    handle.delegate.cancelled = NO;
+    del.wordCb = word_cb;
+    del.wordCbUser = word_cb_user;
+    [del.cond lock];
+    del.cancelled = NO;
+    del.paused = NO;
+    del.interrupted = NO;
+    del.resumeOffset = 0;
+    [del.cond unlock];
 
     /* 문장 단위로 쪼개 순차 발화 — 짧은 발화라야 willSpeakRange가 단어별
-     * 범위를 준다 (긴 단일 발화는 전체범위만 줌). 각 청크의 시작 위치를
-     * chunkBase로 넘겨 단어 범위를 전체 문자열 기준으로 보정. */
+     * 범위를 준다 (긴 단일 발화는 전체범위만 줌). 일시정지 시 같은 청크를
+     * resumeOffset(마지막 단어)부터 다시 발화하므로 인덱스로 루프한다. */
     NSArray<NSValue *> *chunks = kb_split_sentences (text);
-    for (NSValue *cv in chunks) {
-      NSRange cr = cv.rangeValue;
-      if (handle.delegate.cancelled) {
+    NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
+    NSUInteger i = 0;
+    while (i < chunks.count) {
+      /* (A) 일시정지면 재개(또는 정지)까지 대기 */
+      [del.cond lock];
+      while (del.paused && !del.cancelled) {
+        [del.cond wait];
+      }
+      BOOL stop = del.cancelled;
+      NSUInteger off = del.resumeOffset;
+      [del.cond unlock];
+      if (stop) {
         break;
       }
+
+      NSRange cr = [chunks[i] rangeValue];
+      if (off > cr.length) {
+        off = 0;
+      }
       NSString *chunk = [text substringWithRange:cr];
-      if ([chunk stringByTrimmingCharactersInSet:
-                     [NSCharacterSet whitespaceCharacterSet]].length == 0) {
-        continue;  /* 공백뿐인 청크 skip */
+      NSString *sub = (off > 0) ? [chunk substringFromIndex:off] : chunk;
+
+      if ([[sub stringByTrimmingCharactersInSet:ws] length] == 0) {
+        /* 남은 부분이 공백뿐 → 이 청크 완료로 보고 다음으로 */
+        [del.cond lock];
+        del.resumeOffset = 0;
+        [del.cond unlock];
+        i++;
+        continue;
       }
 
       AVSpeechUtterance *utterance =
-          [AVSpeechUtterance speechUtteranceWithString:chunk];
+          [AVSpeechUtterance speechUtteranceWithString:sub];
       /* didFinish가 audio flush보다 먼저 와서 마지막 음절(한국어 받침)이
        * 잘리는 것 방지 — 각 청크 끝에 짧은 지연. */
       utterance.postUtteranceDelay = 0.25;
@@ -272,27 +336,44 @@ mac_tts_speak (mac_tts_ctx *ctx, const char *utf8_text,
         utterance.voice = voice;
       }
 
-      handle.delegate.chunkBase = cr.location;
+      /* 단어 범위를 전체 문자열 기준으로 보정하기 위한 기준점.
+       * subBase = 이번 발화가 청크 내에서 시작하는 오프셋(이어재생 위치). */
+      del.subBase = off;
+      del.chunkBase = cr.location + off;
+      del.lastWordInChunk = off;
 
-      [handle.delegate.cond lock];
-      handle.delegate.done = NO;
-      [handle.delegate.cond unlock];
+      [del.cond lock];
+      del.done = NO;
+      del.interrupted = NO;
+      [del.cond unlock];
 
       [handle.synth speakUtterance:utterance];
 
-      [handle.delegate.cond lock];
-      while (!handle.delegate.done) {
-        [handle.delegate.cond wait];
+      [del.cond lock];
+      while (!del.done) {
+        [del.cond wait];
       }
-      [handle.delegate.cond unlock];
+      BOOL wasCancelled = del.cancelled;
+      BOOL wasInterrupted = del.interrupted;
+      [del.cond unlock];
 
-      if (handle.delegate.cancelled) {
+      if (wasCancelled) {
         break;
       }
+      if (wasInterrupted) {
+        /* 일시정지로 끊김 — 같은 청크(i)를 resumeOffset 부터 다시. 위 (A)에서
+         * paused가 풀릴 때까지 기다린 뒤 재발화한다. */
+        continue;
+      }
+      /* 자연 완료 → 다음 청크 */
+      [del.cond lock];
+      del.resumeOffset = 0;
+      [del.cond unlock];
+      i++;
     }
 
-    handle.delegate.wordCb = NULL;
-    handle.delegate.wordCbUser = NULL;
+    del.wordCb = NULL;
+    del.wordCbUser = NULL;
     return 0;
   }
 }
