@@ -1,4 +1,4 @@
-# 전체 빌드 CI (2차) — macOS 러너에서 plugin·.app을 실제로 빌드해 검증 (#13).
+# 전체 빌드 CI (2차) — macOS 러너에서 네이티브(plugin·tools)를 실제로 빌드해 검증 (#13).
 #
 # 비용이 크다(공식 GStreamer .pkg 수백 MB + macOS 러너). 그래서 **PR마다 돌리지
 # 않고** 트리거를 제한한다: 기본 브랜치(main) 푸시, 릴리스 태그(v*), 수동 실행만.
@@ -6,6 +6,11 @@
 #
 # 1차 CI(ci.yml, Linux)는 모든 PR에서 린트·순수 단위 테스트를 빠르게 돌린다.
 # 여기서는 그게 검증 못 하는 것(네이티브 빌드, 플러그인/도구 런타임 테스트)을 본다.
+#
+# 범위: plugin(meson/ninja) + tools(make) 빌드 + pytest. PyInstaller .app
+# 패키징은 PyGObject 번들링이 러너 환경에 민감해(로컬과 다른 gir/dyld 경로)
+# 여기선 다루지 않는다 — #13의 ".app은 가능하면" 항목으로, 별도 후속 과제.
+# (.app은 로컬 `./scripts/setup-dev.sh --build-app`로 검증한다.)
 
 name: macOS full build
 
@@ -69,18 +74,17 @@ jobs:
           echo "$GST_FRAMEWORK_BIN" >> "$GITHUB_PATH"
 
       # 재현 가능한 빌드 절차(BUILD.md/setup-dev.sh)를 그대로 사용:
-      # meson/ninja plugin 빌드 + GUI venv + tools(make) + PyInstaller .app.
-      # --no-install: /Applications 복사 생략, --install-deps: meson/ninja brew 설치.
-      - name: Full build (plugin + tools + .app)
-        run: ./scripts/setup-dev.sh --build-app --no-install --install-deps
+      # meson/ninja plugin 빌드 + tools(make). --no-gui로 GUI venv·.app은 생략
+      # (PyInstaller .app은 후속 과제). --install-deps: meson/ninja brew 설치.
+      - name: Build native (plugin + tools)
+        run: ./scripts/setup-dev.sh --no-gui --install-deps
 
       - name: Verify build artifacts
         run: |
           set -euo pipefail
           test -f plugin/builddir/gstmacttssink.dylib
           test -x tools/kb-tts-export/kb-tts-export
-          test -d gui/dist/AnnoySpeaker.app
-          echo "✅ plugin dylib · export tool · .app 모두 생성됨"
+          echo "✅ plugin dylib · export tool 생성됨"
 
       # 1차 CI에서 skip되던 플러그인/도구 런타임 테스트가 여기서 실제로 돈다
       # (gst-inspect 속성, kb-tts-export m4a 변환 — 오프라인 합성이라 동작).
