@@ -1,0 +1,91 @@
+# 전체 빌드 CI (2차) — macOS 러너에서 plugin·.app을 실제로 빌드해 검증 (#13).
+#
+# 비용이 크다(공식 GStreamer .pkg 수백 MB + macOS 러너). 그래서 **PR마다 돌리지
+# 않고** 트리거를 제한한다: 기본 브랜치(main) 푸시, 릴리스 태그(v*), 수동 실행만.
+# GStreamer .pkg는 버전을 키로 캐시해 매 실행 재다운로드를 피한다.
+#
+# 1차 CI(ci.yml, Linux)는 모든 PR에서 린트·순수 단위 테스트를 빠르게 돌린다.
+# 여기서는 그게 검증 못 하는 것(네이티브 빌드, 플러그인/도구 런타임 테스트)을 본다.
+
+name: macOS full build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # GStreamer 공식 .pkg 버전 (BUILD.md §1.1 검증: 1.28.2).
+  # 올릴 때: 이 값만 바꾸면 캐시 키도 자동 갱신된다. 다운로드 페이지:
+  # https://gstreamer.freedesktop.org/download/  (data/pkg/osx/<버전>/)
+  GST_VERSION: "1.28.2"
+  GST_FRAMEWORK_BIN: /Library/Frameworks/GStreamer.framework/Versions/1.0/bin
+
+jobs:
+  build:
+    name: Build plugin + .app (macOS)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 다운로드(수백 MB)가 비용의 대부분 → .pkg 파일을 버전 키로 캐시한다.
+      # 설치(installer) 자체는 빨라서 매번 수행한다.
+      - name: Cache GStreamer .pkg
+        id: gst-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/gst-pkgs
+          key: gstreamer-${{ env.GST_VERSION }}-universal
+
+      - name: Download GStreamer .pkg (cache miss only)
+        if: steps.gst-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/gst-pkgs
+          base="https://gstreamer.freedesktop.org/data/pkg/osx/${GST_VERSION}"
+          curl -fSL --retry 3 -o ~/gst-pkgs/gstreamer-runtime.pkg \
+            "${base}/gstreamer-1.0-${GST_VERSION}-universal.pkg"
+          curl -fSL --retry 3 -o ~/gst-pkgs/gstreamer-devel.pkg \
+            "${base}/gstreamer-1.0-devel-${GST_VERSION}-universal.pkg"
+
+      - name: Install GStreamer framework
+        run: |
+          set -euo pipefail
+          sudo installer -pkg ~/gst-pkgs/gstreamer-runtime.pkg -target /
+          sudo installer -pkg ~/gst-pkgs/gstreamer-devel.pkg -target /
+          # gst-inspect 등 framework 바이너리를 이후 스텝 PATH에 노출
+          echo "$GST_FRAMEWORK_BIN" >> "$GITHUB_PATH"
+
+      # 재현 가능한 빌드 절차(BUILD.md/setup-dev.sh)를 그대로 사용:
+      # meson/ninja plugin 빌드 + GUI venv + tools(make) + PyInstaller .app.
+      # --no-install: /Applications 복사 생략, --install-deps: meson/ninja brew 설치.
+      - name: Full build (plugin + tools + .app)
+        run: ./scripts/setup-dev.sh --build-app --no-install --install-deps
+
+      - name: Verify build artifacts
+        run: |
+          set -euo pipefail
+          test -f plugin/builddir/gstmacttssink.dylib
+          test -x tools/kb-tts-export/kb-tts-export
+          test -d gui/dist/AnnoySpeaker.app
+          echo "✅ plugin dylib · export tool · .app 모두 생성됨"
+
+      # 1차 CI에서 skip되던 플러그인/도구 런타임 테스트가 여기서 실제로 돈다
+      # (gst-inspect 속성, kb-tts-export m4a 변환 — 오프라인 합성이라 동작).
+      - name: Run tests (incl. plugin/tool CLI tests)
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet pytest
+          python -m pytest
