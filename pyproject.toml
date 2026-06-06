@@ -7,3 +7,8 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    # 라이브 AVSpeech 합성이 필요한 테스트. 로컬/실기기에선 돌지만 헤드리스
+    # CI 러너에선 합성 출력·콜백이 안 나와 멈춘다 → 2차 CI에서 -m "not avspeech"로 제외.
+    "avspeech: AVSpeech 음성 합성이 실제로 동작해야 하는 테스트 (헤드리스 CI 제외)",
+]
