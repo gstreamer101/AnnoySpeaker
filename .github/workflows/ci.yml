@@ -1,10 +1,14 @@
 # 가벼운 1차 CI — Linux 러너, GStreamer 없이.
 # 모든 PR과 main push에서 자동 실행. 1분 내 완료 목표.
 #
-# 검사 항목 (세 가지):
-#   1. ruff check + ruff format --check (Python 린트 + 포맷)
-#   2. python -m py_compile (Python 문법 스모크)
-#   3. scripts/check-spdx-headers.py (디렉터리별 SPDX 무결성)
+# 검사 항목:
+#   lint 잡:
+#     1. ruff check + ruff format --check (Python 린트 + 포맷)
+#     2. python -m py_compile (Python 문법 스모크)
+#     3. scripts/check-spdx-headers.py (디렉터리별 SPDX 무결성)
+#   test 잡:
+#     4. pytest — 순수 로직 단위 테스트 (#16). GStreamer/AVSpeech·PySide6 불필요.
+#        플러그인/네이티브 도구 테스트는 의존성이 없으면 자동 skip(2차 CI #13에서 실행).
 #
 # plugin C 컴파일은 GStreamer Framework가 필요하므로 2차 CI(#13)에서.
 
@@ -38,18 +42,39 @@ jobs:
         run: pip install --no-cache-dir ruff
 
       - name: ruff check (Python lint)
-        run: ruff check gui/
+        run: ruff check gui/ tests/
 
       - name: ruff format --check (Python format)
-        run: ruff format --check gui/
+        run: ruff format --check gui/ tests/
 
       - name: py_compile (Python syntax smoke)
         # *.spec 파일은 PyInstaller 전역 함수(Analysis 등) 때문에 제외.
-        # gui/main.py만 실제 Python 모듈로 컴파일.
-        run: python -m py_compile gui/main.py
+        # py_compile은 import를 실행하지 않으므로 PySide6 없이도 문법 검사 가능.
+        run: python -m py_compile gui/main.py gui/textproc.py gui/voices.py
 
       - name: SPDX header integrity
         # 모든 소스에 SPDX 헤더가 있는지 + 디렉터리별 라이선스와 ID가
         # 일치하는지 검사. MIT 디렉터리에 LGPL 헤더가 박힌 파일이 섞여
         # 들어오는 라이선스 오염을 자동 차단.
         run: python3 scripts/check-spdx-headers.py
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: pip install --no-cache-dir pytest
+
+      - name: Run pytest
+        # 순수 로직(textproc/voices) 단위 테스트만 Linux에서 실행된다.
+        # 플러그인/네이티브 도구 테스트는 도구·GStreamer가 없어 자동 skip.
+        run: python -m pytest

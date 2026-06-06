@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 dlgus8648
+#
+# 테스트 러너(pytest) 설정. 순수 로직 단위 테스트는 GStreamer/AVSpeech·PySide6
+# 없이 헤드리스에서 돈다(이슈 #16). 플러그인/도구 테스트는 의존성이 없으면 skip.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

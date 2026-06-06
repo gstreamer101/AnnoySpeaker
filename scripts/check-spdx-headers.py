@@ -30,6 +30,7 @@ RULES: list[tuple[str, str, list[str]]] = [
     ("plugin", "LGPL-2.1-or-later", ["*.c", "*.h", "*.m", "meson.build"]),
     ("gui",    "MIT",               ["*.py", "*.spec"]),
     ("tools",  "MIT",               ["*.m", "*.c", "*.h", "Makefile"]),
+    ("tests",  "MIT",               ["*.py"]),
 ]
 
 # 빌드 산출물·venv·캐시는 검사 대상에서 제외

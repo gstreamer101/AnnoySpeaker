@@ -117,7 +117,36 @@ brew install ruff clang-format
 
 ---
 
-## 4. 디렉터리 간 코드 이동 규칙 (라이선스 무결성)
+## 4. 테스트
+
+순수 로직(텍스트 전처리·문장 처리·음성 목록 필터 등)은 음성 합성 백엔드 없이 헤드리스로 검증되는 단위 테스트가 있습니다. **로직을 바꾸는 PR은 관련 테스트를 함께 추가/갱신해 주세요.**
+
+### 4.1 실행
+
+```bash
+pip install pytest      # 최초 1회
+pytest                  # 저장소 루트에서
+```
+
+GStreamer/AVSpeech·PySide6 없이 돌며 1초 내 끝납니다.
+
+### 4.2 무엇이 테스트되나
+
+- `gui/textproc.py` — 전처리, 읽기 문자열+offset_map, 속도 곡선 (`tests/test_textproc.py`)
+- `gui/voices.py` — `--list-voices` 파싱·필터·기본 선택 (`tests/test_voices.py`)
+- 네이티브 도구/플러그인 — `kb-tts-export` m4a 내보내기, `gst-inspect` 속성 (`tests/test_plugin_cli.py`). **도구·GStreamer가 없는 환경에서는 자동 skip**되고, macOS에서 빌드 후 실행됩니다.
+
+### 4.3 한계 — 자동화할 수 없는 것
+
+실제 **재생/발음**은 macOS AVSpeechSynthesizer(시스템 프레임워크)에 의존하며, 헤드리스 환경에선 소리·콜백이 나오지 않아 자동 검증이 불가능합니다. 따라서 **플러그인(`plugin/`)이나 재생 경로를 바꾸는 PR은 `.app`을 빌드해 재생/일시정지/내보내기를 사람이 직접 확인**해 주세요(방법은 [BUILD.md](BUILD.md)).
+
+### 4.4 CI
+
+위 단위 테스트는 모든 PR에서 자동 실행됩니다(`.github/workflows/ci.yml`의 Unit tests 잡). 린트는 `ruff check gui/ tests/`로 테스트 코드까지 검사하니, 새 테스트도 `ruff format`을 통과하는 상태로 제출해 주세요.
+
+---
+
+## 5. 디렉터리 간 코드 이동 규칙 (라이선스 무결성)
 
 이 프로젝트는 디렉터리별로 다른 라이선스를 적용합니다. 자세한 분할 내용은 [LICENSE](LICENSE)를 참고하세요.
 
@@ -152,7 +181,7 @@ brew install ruff clang-format
 
 ---
 
-## 5. 도움이 필요할 때
+## 6. 도움이 필요할 때
 
 - 빌드가 안 됩니다 → [BUILD.md](BUILD.md)의 "자주 만나는 문제" 절을 먼저 확인해 주세요.
 - 어디서부터 시작해야 할지 모르겠습니다 → 이슈 트래커에서 `good first issue` 라벨이 붙은 이슈를 찾아보세요(라벨링은 점진적으로 진행 중입니다).
