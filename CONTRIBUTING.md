@@ -149,7 +149,7 @@ GStreamer/AVSpeech·PySide6 없이 돌며 1초 내 끝납니다.
 CI는 두 단계입니다:
 
 - **1차 (모든 PR, Linux)** — `.github/workflows/ci.yml`. 린트(`ruff check gui/ tests/`)·SPDX·순수 단위 테스트(pytest). 빠르게(1분 내) 돌며 PR 게이트 역할. 새 테스트도 `ruff format`을 통과하는 상태로 제출해 주세요.
-- **2차 (main 푸시·릴리스 태그·수동, macOS)** — `.github/workflows/build-macos.yml`. 공식 GStreamer로 plugin(meson/ninja)·tools를 실제 빌드하고, 1차에서 skip되던 플러그인/도구 런타임 테스트까지 실행. 비용이 커서 PR마다 돌리지 않습니다 — **플러그인/빌드 관련 PR은 머지 전 로컬에서 `./scripts/setup-dev.sh --build-app`로 `.app` 패키징까지 확인**해 주세요(`.app` 빌드는 2차 CI 범위 밖, 로컬 검증).
+- **2차 (main 푸시·릴리스 태그·수동, macOS)** — `.github/workflows/build-macos.yml`. 공식 GStreamer로 plugin(meson/ninja)·tools·`.app`(PyInstaller)을 실제 빌드하고, 1차에서 skip되던 플러그인/도구 런타임 테스트(`-m "not avspeech"`)까지 실행. 비용이 커서 PR마다 돌리지 않습니다 — **플러그인/빌드 관련 PR은 머지 전 로컬에서 `./scripts/setup-dev.sh --build-app`로 빌드를 확인**해 주세요. (라이브 재생/발음 등 AVSpeech 합성 검증은 자동화 불가 → 실기기 수동.)
 
 ---
 
