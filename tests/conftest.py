@@ -48,3 +48,15 @@ def long_text() -> str:
     # 발췌를 반복해 수천 자(여러 문장 청크)로. 단락 사이는 빈 줄로.
     excerpt = (_DATA / "memil_excerpt.txt").read_text(encoding="utf-8").strip()
     return "\n\n".join(excerpt for _ in range(8))
+
+
+@pytest.fixture
+def large_text() -> str:
+    # 대용량 m4a 변환 검증용 — 1만 자 이상이 될 때까지 발췌 반복.
+    excerpt = (_DATA / "memil_excerpt.txt").read_text(encoding="utf-8").strip()
+    parts: list[str] = []
+    total = 0
+    while total < 10_000:
+        parts.append(excerpt)
+        total += len(excerpt) + 2  # "\n\n" 구분자 포함 근사
+    return "\n\n".join(parts)

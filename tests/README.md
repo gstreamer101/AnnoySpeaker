@@ -77,7 +77,8 @@ pytest                  # 저장소 루트에서 (또는: gui/.venv/bin/python -
 | 테스트 | 검증 대상 기능 | 정상 동작(기대) |
 |---|---|---|
 | `test_list_voices_format` | `kb-tts-export --list-voices` | exit 0, 각 줄이 `id\tname\tlang\tquality` 4필드 이상 |
-| `test_export_short_text_creates_m4a` | m4a 내보내기 | exit 0, `.m4a` 생성(크기>0), stderr에 `Encoding`/`Saved:` |
+| `test_export_short_text_creates_m4a` | m4a 내보내기 (짧은 텍스트) | exit 0, **유효한 m4a 컨테이너**(ftyp 박스, 크기>0), stderr에 `Encoding`/`Saved:` |
+| `test_export_large_text_creates_m4a` | m4a 내보내기 (1만 자 이상 대용량) | exit 0, 유효한 m4a 컨테이너, `Saved:`, 청크 2개 이상으로 분할 |
 | `test_export_long_text_per_chunk_progress` | **회귀 #54** | 긴 텍스트가 여러 청크로 분할, `... i/N chunks` 진행이 **청크마다**(10개마다 아님) 출력 |
 | `test_macttssink_exposes_properties` | 플러그인 속성 | `gst-inspect-1.0 macttssink`가 `rate`/`pitch`/`volume`/`voice` 노출 |
 

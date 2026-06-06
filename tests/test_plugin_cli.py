@@ -34,6 +34,21 @@ requires_gst_inspect = pytest.mark.skipif(
 )
 
 
+def _assert_valid_m4a(path: Path) -> int:
+    """생성된 파일이 비어있지 않고 유효한 m4a(MP4) 컨테이너인지 확인하고 크기 반환.
+
+    MP4/m4a는 'ftyp' 박스로 시작한다(보통 4~8바이트 위치). 0바이트/깨진 파일을
+    "생성됨"으로 착각하지 않도록 컨테이너 매직까지 본다.
+    """
+    assert path.exists(), "m4a 파일이 생성되지 않음"
+    size = path.stat().st_size
+    assert size > 0, "m4a 파일이 비어 있음"
+    with path.open("rb") as f:
+        head = f.read(16)
+    assert b"ftyp" in head, f"유효한 m4a(ftyp) 컨테이너가 아님 (head={head!r})"
+    return size
+
+
 # ---- kb-tts-export ---------------------------------------------------------
 
 
@@ -55,6 +70,7 @@ def test_list_voices_format():
 
 @requires_export_tool
 def test_export_short_text_creates_m4a(tmp_path, short_text):
+    """(1) 짧은 텍스트가 유효한 m4a로 잘 생성되는지."""
     out = tmp_path / "short.m4a"
     res = subprocess.run(
         [str(_EXPORT_TOOL), "--out", str(out), "--rate", "0.55"],
@@ -64,8 +80,28 @@ def test_export_short_text_creates_m4a(tmp_path, short_text):
         timeout=60,
     )
     assert res.returncode == 0, res.stderr
-    assert out.exists() and out.stat().st_size > 0
+    _assert_valid_m4a(out)
     assert "Encoding" in res.stderr and "Saved:" in res.stderr
+
+
+@requires_export_tool
+def test_export_large_text_creates_m4a(tmp_path, large_text):
+    """(2) 1만 자 이상 대용량 텍스트도 유효한 m4a로 잘 생성되는지."""
+    assert len(large_text) >= 10_000, "대용량 픽스처가 1만 자 미만"
+    out = tmp_path / "large.m4a"
+    res = subprocess.run(
+        [str(_EXPORT_TOOL), "--out", str(out), "--rate", "0.6"],
+        input=large_text,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert res.returncode == 0, res.stderr
+    _assert_valid_m4a(out)
+    assert "Saved:" in res.stderr
+    # 대용량이므로 청크가 여럿이어야 한다
+    m = re.search(r"Encoding (\d+) chunk", res.stderr)
+    assert m and int(m.group(1)) > 1, f"청크 분할이 안 됨:\n{res.stderr}"
 
 
 @requires_export_tool
